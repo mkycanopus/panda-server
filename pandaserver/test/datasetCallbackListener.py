@@ -76,27 +76,27 @@ class DatasetCallbackListener(stomp.ConnectionListener):
             # send ack
             id = headers['message-id']
             #self.conn.ack(id,self.subscription_id)
-	    # convert message form str to dict
+	        # convert message form str to dict
             messageDict = yaml.load(message)
             # check event type
             if not messageDict['event_type'] in ['datasetlock_ok']:
                 _logger.debug('%s skip' % messageDict['event_type'])
                 return
-	    _logger.debug('%s start' % messageDict['event_type'])  
+            _logger.debug('%s start' % messageDict['event_type'])
             messageObj = messageDict['payload']
             # only for _dis or _sub
-	    dsn = messageObj['name']
-	    if (re.search('_dis\d+$',dsn) == None) and (re.search('_sub\d+$',dsn) == None):
-		_logger.debug('%s is not _dis or _sub dataset, skip' % dsn)
-		return
+	        dsn = messageObj['name']
+            if (re.search('_dis\d+$',dsn) == None) and (re.search('_sub\d+$',dsn) == None):
+                _logger.debug('%s is not _dis or _sub dataset, skip' % dsn)
+                return
             # take action
-	    scope = messageObj['scope']
-	    site  = messageObj['rse']
-	    _logger.debug('%s site=%s type=%s' % (dsn, site, messageDict['event_type']))
-	    thr = DDMHandler(self.taskBuffer,None,site,dsn,scope)
-	    thr.start()
-	    thr.join()
-	    _logger.debug('done %s' % dsn)
+            scope = messageObj['scope']
+            site  = messageObj['rse']
+            _logger.debug('%s site=%s type=%s' % (dsn, site, messageDict['event_type']))
+            thr = DDMHandler(self.taskBuffer, None, site, dsn, scope)
+            thr.start()
+            thr.join()
+            _logger.debug('done %s' % dsn)
         except:
             errtype,errvalue = sys.exc_info()[:2]
             _logger.error("on_message : %s %s" % (errtype,errvalue))
@@ -135,14 +135,14 @@ def main(backGround=False):
         # instantiate sitemapper
         siteMapper = SiteMapper(taskBuffer)
         # ActiveMQ params
-	queue = '/queue/Consumer.panda.rucio.events'
+	    queue = '/queue/Consumer.panda.rucio.events'
         ssl_opts = {'use_ssl' : True,
                     'ssl_version' : ssl.PROTOCOL_TLSv1,
                     'ssl_cert_file' : certName,
                     'ssl_key_file'  : keyName}
         # resolve multiple brokers
         brokerList = socket.gethostbyname_ex('atlas-mb.cern.ch')[-1]
-	# set listener
+	    # set listener
         connList = []
         for tmpBroker in brokerList:
             try:
@@ -159,15 +159,16 @@ def main(backGround=False):
             for conn in connList:
                 try:
                     if not conn.is_connected():
-                        conn.set_listener('DatasetCallbackListener', DatasetCallbackListener(conn,taskBuffer,siteMapper,
+                        conn.set_listener('DatasetCallbackListener', DatasetCallbackListener(conn,taskBuffer,
+                                                                                             siteMapper,
                                                                                              subscription_id))
                         conn.start()
                         conn.connect(headers = {'client-id': clientid})
                         conn.subscribe(destination=queue, id=subscription_id, ack='auto')
                         _logger.debug('listener %s is up and running' % clientid)
                 except:     
-                    errtype,errvalue = sys.exc_info()[:2]
-                    _logger.error("failed to set listener on %s : %s %s" % (tmpBroker,errtype,errvalue))
+                    errtype, errvalue = sys.exc_info()[:2]
+                    _logger.error("failed to set listener on %s : %s %s" % (tmpBroker, errtype, errvalue))
                     catch_sig(None,None)
             time.sleep(5)
             
@@ -187,7 +188,7 @@ if __name__ == "__main__":
             if not items[0] in ['sm','atlpan','pansrv','root']: # ['os.getlogin()']: doesn't work in cron
                 continue
             # look for python
-            if re.search('python',line) == None:
+            if re.search('python', line) == None:
                 continue
             # PID
             pid = items[1]

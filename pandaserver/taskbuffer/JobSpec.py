@@ -340,12 +340,11 @@ class JobSpec(object):
 
     # get DDM backend
     def getDdmBackEnd(self):
-        if self.specialHandling == None:
-            return None
-        for tmpItem in self.specialHandling.split(','):
-            if tmpItem.startswith('ddm:'):
-                return tmpItem.split(':')[-1]
-        return None
+        """
+        Function from the DQ2 -> Rucio migration
+        :return:
+        """
+        return 'rucio'
 
 
 
