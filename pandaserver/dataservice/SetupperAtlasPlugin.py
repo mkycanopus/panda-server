@@ -784,8 +784,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                             break
                         except:
                             status = False
-                            errType, errValue = sys.exc_info()[:2]
-                            out = "%s %s" % (errType, errValue)
+                            err_type, err_value = sys.exc_info()[:2]
+                            out = "%s %s" % (err_type, err_value)
                             time.sleep(10)
                     if not status:
                         self.logger.error(out)
@@ -1548,6 +1548,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                         # failure
                         if not isOK:
                             continue
+
         # insert datasets to DB
         self.taskBuffer.insertDatasets(dispList)
         self.logger.debug('finished to make dis datasets for existing files')
