@@ -7,32 +7,20 @@ import re
 import sys
 import time
 import uuid
-import types
-import urllib
-import hashlib
 import datetime
 import commands
-import threading
 import traceback
 import ErrorCode
-from DDM import rucioAPI
-from taskbuffer.JobSpec import JobSpec
-from taskbuffer.FileSpec import FileSpec
+
 from taskbuffer.DatasetSpec import DatasetSpec
-from taskbuffer import retryModule
 from taskbuffer import EventServiceUtils
 from brokerage.SiteMapper import SiteMapper
-from brokerage.PandaSiteIDs import PandaMoverIDs
 import brokerage.broker
 import DataServiceUtils
-from rucio.client import Client as RucioClient
-from rucio.common.exception import FileAlreadyExists,DataIdentifierAlreadyExists,Duplicate,\
-    DataIdentifierNotFound
-
 from SetupperPluginBase import SetupperPluginBase
+from DDM import rucioAPI
 
-from config import panda_config
-
+from rucio.common.exception import DataIdentifierNotFound
 
 class SetupperAtlasPlugin (SetupperPluginBase):
     # constructor
