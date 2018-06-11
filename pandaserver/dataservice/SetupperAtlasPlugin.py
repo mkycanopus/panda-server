@@ -24,15 +24,15 @@ from rucio.common.exception import DataIdentifierNotFound
 
 class SetupperAtlasPlugin (SetupperPluginBase):
     # constructor
-    def __init__(self,taskBuffer,jobs,logger,**params):
+    def __init__(self, taskBuffer, jobs, logger, **params):
         # defaults
-        defaultMap = {'resubmit'      : False,
-                      'pandaDDM'      : False,
-                      'ddmAttempt'    : 0,
-                      'resetLocation' : False,
-                      'useNativeDQ2'  : True,
+        defaultMap = {'resubmit': False,
+                      'pandaDDM': False,
+                      'ddmAttempt': 0,
+                      'resetLocation': False,
+                      'useNativeDQ2': True,
                      }
-        SetupperPluginBase.__init__(self,taskBuffer,jobs,logger,params,defaultMap)
+        SetupperPluginBase.__init__(self, taskBuffer, jobs, logger, params, defaultMap)
         # VUIDs of dispatchDBlocks
         self.vuidMap = {}
         # file list by dispatch dataset
