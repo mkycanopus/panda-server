@@ -1,6 +1,11 @@
 '''
 setup dataset for ATLAS
 
+background (TODO: complete the background):
+- jobs with missing files have file.status = pending and have job.dispatchdblock set.
+  For these jobs the function setupSource + _subscribeDistpatchDB take care of the input subscriptions
+- jobs with existing files have file.status = ready and job.dispatchdblock = None.
+  For these jobs the function _makeDisDatasetsForExistingfiles takes care of the input subscriptions (like a pinning)
 '''
 
 import re
@@ -410,7 +415,6 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         del input_ds_list
         del input_ds_errors
 
-
     def _setupDestination(self, startIdx=-1, nJobsInLoop=50):
         """
         Create datasets for outputs in the repository and assign destination
@@ -434,13 +438,13 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         for job in job_list:
 
             # ignore failed jobs
-            if job.jobStatus in ['failed','cancelled'] or job.isCancelled():
+            if job.jobStatus in ['failed', 'cancelled'] or job.isCancelled():
                 continue
 
             zip_file_map = job.getZipFileMap()
             for file in job.Files:
                 # ignore input files
-                if file.type in ['input','pseudo_input']:
+                if file.type in ['input', 'pseudo_input']:
                     continue
                 # don't touch with outDS for unmerge jobs
                 if job.prodSourceLabel == 'panda' and job.processingType == 'unmerge' and file.type != 'log':
