@@ -2,10 +2,13 @@
 setup dataset for ATLAS
 
 background (TODO: complete the background):
+- correctLFNs prepares all the information so that it can be reused in all the other steps
 - jobs with missing files have file.status = pending and have job.dispatchdblock set.
   For these jobs the function setupSource + _subscribeDistpatchDB take care of the input subscriptions
 - jobs with existing files have file.status = ready and job.dispatchdblock = None.
   For these jobs the function _makeDisDatasetsForExistingfiles takes care of the input subscriptions (like a pinning)
+- in order to optimize the interactions with Rucio (i.e. not to generate datasets with one file), several jobs should
+  share the same dispatch block
 '''
 
 import re
@@ -58,7 +61,30 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         self.lfnDatasetMap = {}
         # missing files at T1
         self.missingFilesInT1 = {}
-        
+
+    def __call_retry(self, call, *args, **kwargs):
+        """
+        Wrapper to make remote calls reliable
+        """
+
+        max_attempts = 3
+        sleep_time = 10
+
+        for i in xrange(1, max_attempts + 1):
+            try:
+                return True, call(*args, **kwargs)
+            except:
+                # Log the error
+                err_type, err_value = sys.exc_info()[:2]
+                err_msg = "Call to {0} failed with {1}:{2}".format(call, err_type, err_value)
+                self.logger.debug(err_msg)
+
+                if i < max_attempts:
+                    # sleep and retry
+                    time.sleep(sleep_time)
+                else:
+                    # retried enough, return the error message
+                    return False, err_msg
         
     # main
     def run(self):
@@ -67,15 +93,18 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             self._memoryCheck()
             bunchTag = ''
             timeStart = datetime.datetime.utcnow()
-            if self.jobs != None and len(self.jobs) > 0:
+
+            if self.jobs is not None and len(self.jobs) > 0:
                 bunchTag = 'PandaID:%s type:%s taskID:%s pType=%s' % (self.jobs[0].PandaID,
                                                                       self.jobs[0].prodSourceLabel,
                                                                       self.jobs[0].taskID,
                                                                       self.jobs[0].processingType)
                 self.logger.debug(bunchTag)
+
             # instantiate site mapper
             self.siteMapper = SiteMapper(self.taskBuffer)
-            # correctLFN
+
+            # gather all the information
             self._correctLFN()
 
             # invoke brokerage
@@ -87,6 +116,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
             # remove waiting jobs
             self.removeWaitingJobs()
+
             # setup dispatch dataset
             self.logger.debug('setupSource')
             self._memoryCheck()
@@ -111,7 +141,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 self.jobs = tmpJobList
 
             # create output datasets and assign destination
-            if self.jobs != [] and self.jobs[0].prodSourceLabel in ['managed','test']:
+            if self.jobs != [] and self.jobs[0].prodSourceLabel in ['managed', 'test']:
                 # count the number of jobs per _dis
                 iBunch = 0
                 prevDisDsName = None
@@ -156,15 +186,15 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             # setup jumbo jobs
             self._setupJumbojobs()
             self._memoryCheck()
-            regTime = datetime.datetime.utcnow() - timeStart
-            self.logger.debug('{0} took {1}sec'.format(bunchTag,regTime.seconds))
+            reg_time = datetime.datetime.utcnow() - timeStart
+            self.logger.debug('{0} took {1}sec'.format(bunchTag, reg_time.seconds))
             self.logger.debug('end run()')
         except:
-            errtype, errvalue = sys.exc_info()[:2]
-            errStr = "run() : %s %s" % (errtype, errvalue)
-            errStr.strip()
-            errStr += traceback.format_exc()
-            self.logger.error(errStr)
+            err_type, err_value = sys.exc_info()[:2]
+            err_str = "run() : %s %s" % (err_type, err_value)
+            err_str.strip()
+            err_str += traceback.format_exc()
+            self.logger.error(err_str)
 
     def postRun(self):
         """
@@ -192,7 +222,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
     def _setupSource(self):
         """
-        This function creates the dispatch datasets, resolves the files, and registers them in Rucio and PanDA database.
+        This function creates the INPUT/DISPATCH datasets, resolves the files, and registers them in Rucio and PanDA database.
         There are no subscriptions made for the dispatch blocks yet
         :return:
         """
@@ -217,7 +247,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                     self.logger.debug('listDatasets {0}'.format(job.prodDBlock))
                     input_ds_errors[job.prodDBlock] = ''
                     for iDDMTry in range(3):
-                        newOut,errMsg = rucioAPI.listDatasets(job.prodDBlock)
+                        newOut, errMsg = rucioAPI.listDatasets(job.prodDBlock)
                         if newOut is None:
                             time.sleep(10)
                         else:
@@ -331,44 +361,21 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
                 # register dataset in Rucio
                 self.logger.debug('registerDataset {ds} {meta}'.format(ds=dispatch_block, meta=str(metadata)))
-                nDDMTry = 3
-                isOK = False
                 errStr = ''
-                for iDDMTry in range(nDDMTry):
-                    try:
-                        out = rucioAPI.registerDataset(dispatch_block, disFiles['lfns'], disFiles['guids'],
-                                                       disFiles['fsizes'], disFiles['chksums'],
-                                                       lifetime=7, scope='panda', metadata=metadata)
-                        isOK = True
-                        break
-                    except:
-                        errType, errValue = sys.exc_info()[:2]
-                        errStr = "{0}:{1}".format(errType,errValue)
-                        self.logger.error("registerDataset : failed with {0}".format(errStr))
-                        if iDDMTry+1 == nDDMTry:
-                            break
-                        self.logger.debug("sleep {0}/{1}".format(iDDMTry, nDDMTry))
-                        time.sleep(10)
-
-                if not isOK:
+                status, out = self.__call_retry(rucioAPI.registerDataset, dispatch_block, disFiles['lfns'],
+                                                disFiles['guids'], disFiles['fsizes'], disFiles['chksums'],
+                                                lifetime=7, scope='panda', metadata=metadata)
+                if not status:
                     # registration failed
-                    dispatch_ds_errors[dispatch_block] = "Setupper._setupSource() could not register dispatchDBlock with {0}".format(errStr.split('\n')[-1])
+                    dispatch_ds_errors[dispatch_block] = "Setupper._setupSource() could not register dispatchDBlock with {0}".format(out)
                     continue
+
                 self.logger.debug(out)
-                newOut = out
+                new_out = out
 
                 # freeze dispatch dataset
                 self.logger.debug('closeDataset {0}'.format(dispatch_block))
-                for iDDMTry in range(3):
-                    status = False
-                    try:
-                        rucioAPI.closeDataset(dispatch_block)
-                        status = True
-                        break
-                    except:
-                        errtype, errvalue = sys.exc_info()[:2]
-                        out = 'failed to close : {0} {1}'.format(errtype, errvalue)
-                        time.sleep(10)
+                status, out = self.__call_retry(rucioAPI.closeDataset, dispatch_block)
                 if not status:
                     self.logger.error(out)
                     dispatch_ds_errors[dispatch_block] = "Setupper._setupSource() could not freeze dispatchDBlock with {0}".format(out)
@@ -377,11 +384,11 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 # use PandaDDM
                 self.dispatch_file_map[dispatch_block] = file_list[dispatch_block]
                 # create a fake vuid
-                newOut = {'vuid': str(uuid.uuid4())}
+                new_out = {'vuid': str(uuid.uuid4())}
 
             # get VUID
             try:
-                vuid = newOut['vuid']
+                vuid = new_out['vuid']
                 # datasetspec.currentfiles is used to count the number of failed jobs
                 ds = DatasetSpec()
                 ds.vuid = vuid
@@ -397,8 +404,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 dispList.append(ds)
                 self.vuidMap[ds.name] = ds.vuid
             except:
-                errtype,errvalue = sys.exc_info()[:2]
-                self.logger.error("_setupSource() : %s %s" % (errtype,errvalue))
+                errtype, errvalue = sys.exc_info()[:2]
+                self.logger.error("_setupSource() : %s %s" % (errtype, errvalue))
                 dispatch_ds_errors[dispatch_block] = "Setupper._setupSource() could not decode VUID dispatchDBlock"
 
         # insert datasets to DB
@@ -417,7 +424,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
     def _setupDestination(self, startIdx=-1, nJobsInLoop=50):
         """
-        Create datasets for outputs in the repository and assign destination
+        Create OUTPUT/SUB datasets in the repository and assign destination
         :param startIdx:
         :param nJobsInLoop:
         :return:
@@ -518,7 +525,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                             # skip registration for _sub when src=dest
                             if ((tmpSrcDDM == tmpDstDDM and not EventServiceUtils.isMergeAtOS(job.specialHandling)) \
                                     or DataServiceUtils.getDistributedDestination(file.destinationDBlockToken) != None) \
-                                    and ds_name != original_name and re.search('_sub\d+$',ds_name) != None:
+                                    and ds_name != original_name and re.search('_sub\d+$', ds_name) != None:
                                 # create a fake vuid
                                 newVUID = str(uuid.uuid4())
                             else:
@@ -530,8 +537,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                     dq2IDList = [self.siteMapper.getSite(job.computingSite).ddm_output]
                                 else:
                                     if self.siteMapper.getSite(computing_site).cloud != job.getCloud() and \
-                                            re.search('_sub\d+$',ds_name) != None and \
-                                            (not job.prodSourceLabel in ['user','panda']) and \
+                                            re.search('_sub\d+$', ds_name) != None and \
+                                            (not job.prodSourceLabel in ['user', 'panda']) and \
                                             (not self.siteMapper.getSite(computing_site).ddm_output.endswith('PRODDISK')):
                                         # T1 used as T2. Use both DATADISK and PRODDISK as locations while T1 PRODDISK is phasing out
                                         dq2IDList = [self.siteMapper.getSite(computing_site).ddm_output]
@@ -545,7 +552,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                 if re.search('_sub\d+$',ds_name) == None and DataServiceUtils.getDestinationSE(file.destinationDBlockToken) != None:
                                     # destination is specified
                                     dq2IDList = [DataServiceUtils.getDestinationSE(file.destinationDBlockToken)]
-                                elif (not usingT1asT2) and (not file.destinationDBlockToken in ['NULL','']):
+                                elif (not usingT1asT2) and (not file.destinationDBlockToken in ['NULL', '']):
                                     dq2IDList = []
                                     for tmpToken in tmp_token_list:
                                         # set default
@@ -574,30 +581,19 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                 # register dataset
                                 self.logger.debug('registerNewDataset {ds_name} metadata={meta}'.format(ds_name=ds_name,
                                                                                                      meta=tmpMetadata))
-                                isOK = False
-                                for iDDMTry in range(3):
-                                    try:
-                                        out = rucioAPI.registerDataset(ds_name,metadata=tmpMetadata,
+                                status, out = self.__call_retry(rucioAPI.registerDataset, ds_name,metadata=tmpMetadata,
                                                                        lifetime=tmpLifeTime)
-                                        self.logger.debug(out)
-                                        newVUID = out['vuid']
-                                        isOK = True
-                                        break
-                                    except:
-                                        errType,errValue = sys.exc_info()[:2]
-                                        self.logger.error("registerDataset : failed with {0}:{1}".format(errType,errValue))
-                                        time.sleep(10)
-                                if not isOK:
-                                    tmpMsg = "Setupper._setupDestination() could not register : %s" % ds_name
-                                    dest_error[dest] = tmpMsg
-                                    self.logger.error(tmpMsg)
+                                if not status:
+                                    tmp_msg = 'Setupper._setupDestination() could not register : {0}'.format(ds_name)
+                                    dest_error[dest] = tmp_msg
+                                    self.logger.error(tmp_msg)
                                     continue
 
                                 # register dataset locations
                                 if (job.lockedby == 'jedi' and job.prodSourceLabel in ['panda','user']) or \
                                         DataServiceUtils.getDistributedDestination(file.destinationDBlockToken) != None:
                                     # skip registerDatasetLocations
-                                    status,out = True, ''
+                                    status, out = True, ''
                                 elif ds_name == original_name or tmpSrcDDM != tmpDstDDM or \
                                        job.prodSourceLabel == 'panda' or (job.prodSourceLabel in ['ptest','rc_test'] and \
                                                                           job.processingType in ['pathena','prun','gangarobot-rctest']) \
@@ -636,25 +632,14 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                             self.logger.error(out)
                                             break
 
-                                        for iDDMTry in range(3):
-                                            try:
-                                                out = rucioAPI.registerDatasetLocation(ds_name,[dq2ID],lifetime=repLifeTime,
-                                                                                       activity=activity,
-                                                                                       grouping=grouping)
-                                                self.logger.debug(out)
-                                                status = True
-                                                break
-                                            except:
-                                                errType,errValue = sys.exc_info()[:2]
-                                                out = "{0}:{1}".format(errType,errValue)
-                                                self.logger.error("registerDatasetLocation : failed with {0}".format(out))
-                                                time.sleep(10)
-                                        # failed
+                                        status, out = self.__call_retry(rucioAPI.registerDatasetLocation, ds_name,
+                                                                        [dq2ID], lifetime=repLifeTime,
+                                                                        activity=activity, grouping=grouping)
                                         if not status:
                                             break
                                 else:
                                     # skip registerDatasetLocations
-                                    status,out = True,''
+                                    status, out = True, ''
                                 if not status:
                                     dest_error[dest] = "Could not register location : %s %s" % (ds_name,out.split('\n')[-1])
 
@@ -678,12 +663,12 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                         try:
                             # dataset spec
                             ds = DatasetSpec()
-                            ds.vuid         = newVUID
-                            ds.name         = ds_name
-                            ds.type         = 'output'
-                            ds.numberfiles  = 0
+                            ds.vuid = newVUID
+                            ds.name = ds_name
+                            ds.type = 'output'
+                            ds.numberfiles = 0
                             ds.currentfiles = 0
-                            ds.status       = 'defined'
+                            ds.status = 'defined'
                             # append
                             dataset_map[(ds_name,file.destinationSE, computing_site)] = ds
                         except:
@@ -711,6 +696,29 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         # insert datasets to DB
         return self.taskBuffer.insertDatasets(dataset_map.values())
 
+    def _prepare_subscription_metadata(self, job):
+        """
+        Prepare relevant metadata that needs to be specified in the subscription (e.g. activity, task)
+        """
+
+        opt_owner = None
+        opt_activity = None
+        opt_comment = None
+
+        # set activity
+        if job.prodSourceLabel in ['user', 'panda']:
+            opt_activity = "Analysis Input"
+        elif job.processingType == 'urgent' or job.currentPriority > 1000:
+            opt_activity = 'Express'
+        else:
+            opt_activity = "Production Input"
+
+        # set task ID in comment
+        if job.jediTaskID not in ['NULL', 0]:
+            opt_comment = 'task_id:{0}'.format(job.jediTaskID)
+
+        return opt_owner, opt_activity, opt_comment
+
     def _subscribeDistpatchDB(self):
         """
         Subscribe distpatchDBlocks to sites
@@ -733,53 +741,42 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             if dispatch_ds_errors.has_key(disp) == 0:
                 dispatch_ds_errors[disp] = ''
 
+                # TODO: here you need the better logic of a distributed dataset
+                # TODO: is there any precaution to take in case of staging?
                 # destination endpoints
-                dst_sitespec = self.siteMapper.getSite(job.computingSite)
-                dst_endpoint = dst_sitespec.ddm_input # TODO: here you need the better logic of a distributed dataset
-                                                       # TODO: is there any precaution to take in case of staging?
+                computing_site_spec = self.siteMapper.getSite(job.computingSite)
 
-                # use DDM/Rucio
+                # 1. Find the location of the input files on associated storages
+                status, dst_endpoints = self.__call_retry(rucioAPI.list_file_replicas, job.dispatchDBlock, computing_site_spec)
+                if not status:
+                    continue
+
+
+                # 2. Unless Rucio is not in use, prepare the subscription
                 if (not self.pandaDDM) and job.prodSourceLabel != 'ddm':
 
-                    # set activity and owner
-                    if job.prodSourceLabel in ['user', 'panda']:
-                        opt_activity = "Analysis Input"
-                        #opt_owner = DataServiceUtils.cleanupDN(job.prodUserID)
-                        opt_owner = None
-                    else:
-                        opt_owner = None
-                        if job.processingType == 'urgent' or job.currentPriority > 1000:
-                            opt_activity = 'Express'
-                        else:
-                            opt_activity = "Production Input"
-
-                    # taskID
-                    if job.jediTaskID not in ['NULL',0]:
-                        optComment = 'task_id:{0}'.format(job.jediTaskID)
-                    else:
-                        optComment = None
+                    opt_owner, opt_activity, opt_comment = self._prepare_subscription_metadata(self, job)
 
                     # TODO: this part needs the Rucio distributed dataset logic
                     # http://rucio.readthedocs.io/en/latest/api/rule.html
                     # register subscription
+                    # The key parameter to change is the grouping. Per default this is DATASET, but if you set this
+                    # to NONE then the files of the dataset are distributed (randomly), assuming that the
+                    # rse_expression covers more than 1 RSE. There is not awful lot documentation about the exact
+                    # mechanic of how the file distribution works, but it is anyway quite simple:
+                    # The algorithm prioritizes re-using existing replicas over anything else. Otherwise it chooses
+                    # the destinations randomly, unless the weight parameter is chosen when doing add_replication_rule.
+                    # Then it distributes according to the weight (e.g. mou, freespace, etc.)
+
                     self.logger.debug('{0} {1} {2}'.format('registerDatasetSubscription',
-                                                           (job.dispatchDBlock, dst_endpoint),
+                                                           (job.dispatchDBlock, dst_endpoints),
                                                            {'activity': opt_activity, 'lifetime': 7,
-                                                            'dn': opt_owner, 'comment': optComment}))
-                    for iDDMTry in range(3):
-                        try:
-                            status = rucioAPI.registerDatasetSubscription(job.dispatchDBlock, [dst_endpoint],
-                                                                          activity=opt_activity,
-                                                                          lifetime=7, dn=opt_owner,
-                                                                          comment=optComment)
-                            out = 'OK'
-                            break
-                        except:
-                            status = False
-                            err_type, err_value = sys.exc_info()[:2]
-                            out = "%s %s" % (err_type, err_value)
-                            time.sleep(10)
-                    if not status:
+                                                            'dn': opt_owner, 'comment': opt_comment, 'grouping': 'NONE'}))
+
+                    status, out = self.__call_retry(rucioAPI.registerDatasetSubscription, job.dispatchDBlock,
+                                                    dst_endpoints, activity=opt_activity, lifetime=7, dn=opt_owner,
+                                                    comment=opt_comment, grouping='NONE')
+                    if not status or not out:
                         self.logger.error(out)
                         dispatch_ds_errors[disp] = "Setupper._subscribeDistpatchDB() could not register subscription"
                     else:
@@ -795,6 +792,275 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         # update failed jobs only, succeeded jobs should be activated by DDM callback
         self.updateFailedJobs(failed_jobs)
 
+    def __clean_lfn(self, dirty_lfn):
+        # remove the attempt number at the end of the LFN
+        return re.sub('\.\d+$', '', dirty_lfn)
+
+    def __collect_input_lfns(self):
+        # iterate the jobs and its files to make a list with all the LFNs (with and without attempt number)
+        input_lfn_list = set()
+
+        # iterate jobs
+        for tmpJob in self.jobs:
+            for file_tmp in tmpJob.Files:
+                if file_tmp.type == 'input':
+
+                    # add the LFN with and without attempt number to the list
+                    input_lfn_list.add(file_tmp.lfn)
+                    gen_lfn = self.__clean_lfn(file_tmp.lfn)
+                    input_lfn_list.add(gen_lfn)
+
+                    if file_tmp.GUID not in ['NULL', '', None]:
+                        if not file_tmp.dataset in self.lfnDatasetMap:
+                            self.lfnDatasetMap[file_tmp.dataset] = {}
+                        self.lfnDatasetMap[file_tmp.dataset][file_tmp.lfn] = {'guid': file_tmp.GUID,
+                                                                              'chksum': file_tmp.checksum,
+                                                                              'md5sum': file_tmp.md5sum,
+                                                                              'fsize': file_tmp.fsize,
+                                                                              'scope': file_tmp.scope}
+        return input_lfn_list
+
+    def __get_file_metadata(self, dataset, input_lfn_list, lfn_map):
+        """
+        Does a rucio.list_files of the dataset to retrieve the file metadata (checksum, size, events...)
+        """
+
+        input_ds_errors = []
+        missing_datasets = {}
+        lfn_dataset_map = {}
+        file_metadata = {}
+
+        status, out = self.getListFilesInDataset(dataset, input_lfn_list)
+        if status != 0:
+            self.logger.error(out)
+            input_ds_errors[dataset] = 'could not get file list of prodDBlock %s' % dataset
+            self.logger.error(input_ds_errors[dataset])
+            if status == -1:
+                missing_datasets[dataset] = 'DS:{0} not found in DDM'.format(dataset)
+            else:
+                missing_datasets[dataset] = out
+        else:
+            # make map (key: LFN w/o attemptNr, value: LFN with attemptNr)
+            file_list = out
+            try:
+                # loop over all files
+                for tmp_lfn, file_metadata in file_list.iteritems():
+                    file_metadata[tmp_lfn] = file_metadata
+                    gen_lfn = self.__clean_lfn(tmp_lfn)
+                    if lfn_map[dataset].has_key(gen_lfn):
+                        # get attemptNr
+                        new_attempt_nr = 0
+                        new_mat = re.search('\.(\d+)$', tmp_lfn)
+                        if new_mat != None:
+                            new_attempt_nr = int(new_mat.group(1))
+                        old_attempt_nr = 0
+                        old_mat = re.search('\.(\d+)$', lfn_map[dataset][gen_lfn])
+                        if old_mat is not None:
+                            old_attempt_nr = int(old_mat.group(1))
+                        # keep the highest attempt number in the lfn map
+                        if new_attempt_nr > old_attempt_nr:
+                            lfn_map[dataset][gen_lfn] = tmp_lfn
+                    else:
+                        lfn_map[dataset][gen_lfn] = tmp_lfn
+
+                    lfn_dataset_map[lfn_map[dataset][gen_lfn]] = dataset
+            except:
+                input_ds_errors[dataset] = 'could not convert HTTP-res to map for prodDBlock %s' % dataset
+                self.logger.error(input_ds_errors[dataset])
+                self.logger.error(out)
+
+        return file_metadata, input_ds_errors, missing_datasets, lfn_dataset_map
+
+    def __get_dataset_replica_locations(self, job, dataset, input_ds_errors, replica_map):
+        # get dataset replica locations
+
+        if job.prodSourceLabel in ['managed', 'test'] and input_ds_errors[dataset] == '' \
+                and (not replica_map.has_key(dataset)):
+            if dataset.endswith('/'):
+                status, out = self.getListDatasetReplicasInContainer(dataset)
+            else:
+                status, out = self.getListDatasetReplicas(dataset, False)
+
+            if status != 0 or out.startswith('Error'):
+                input_ds_errors[dataset] = 'could not get locations for {0}'.format(dataset)
+                self.logger.error(input_ds_errors[dataset])
+                self.logger.error(out)
+            else:
+                tmp_replicas_sites = {}
+                try:
+                    # convert res to map
+                    exec "tmp_replicas_sites = %s" % out
+                    replica_map[dataset] = tmp_replicas_sites
+                except:
+                    input_ds_errors[dataset] = 'could not convert HTTP-res to replica map {0}'.format(dataset)
+                    self.logger.error(input_ds_errors[dataset])
+                    self.logger.error(out)
+
+                # append except DBR
+                if not dataset.startswith('ddo'):
+                    self.replica_mapForBroker[dataset] = tmp_replicas_sites
+
+        return
+
+    def __is_failed_job(self, job, datasets, missing_datasets, jobs_failed, jobs_waiting, input_ds_errors):
+        """
+        Checks whether the dataset is missing or there was another error
+        """
+
+        # check the job for missing datasets. Set the job as failed and the files as missing
+        for dataset in datasets:
+            if dataset in missing_datasets:
+                job.jobStatus = 'failed'
+                job.ddmErrorCode = ErrorCode.EC_GUID
+                job.ddmErrorDiag = missing_datasets[dataset]
+
+                for file_tmp in job.Files:
+                    if file_tmp.dataset == dataset:
+                        file_tmp.status = 'missing'
+
+                # append job to failed list
+                jobs_failed.append(job)
+                self.logger.debug("{0} failed with {1}".format(job.PandaID, missing_datasets[dataset]))
+                return True
+
+        # check for waiting
+        for dataset in datasets:
+            if input_ds_errors[dataset] != '':
+                # append job to waiting list
+                jobs_waiting.append(job)
+                return True
+
+        return False
+
+    def __update_file_info(self, job, jobs_processed, lfn_map, file_metadata, jobs_failed, all_lfns, all_guids, all_scopes):
+        """
+        Iterates the files updating their metadata and replacing the LFN
+        """
+        replace_list = []
+
+        is_failed = False
+        for file in job.Files:
+            if not (file.type == 'input' and file.dispatchDBlock == 'NULL'):
+                continue
+
+            add_to_lfn_map = True
+            if file.GUID == 'NULL':
+                clean_lfn = self.__clean_lfn(file.lfn)
+                # get the lfn with the last attempt number
+                if clean_lfn == file.lfn and clean_lfn in lfn_map[file.dataset].keys():
+                    file.lfn = lfn_map[file.dataset][clean_lfn]
+                    replace_list.append((clean_lfn, file.lfn))
+
+                # set file metadata
+                if file.lfn in file_metadata:
+                    file.GUID = file_metadata[file.lfn]['guid']
+                    file.fsize = file_metadata[file.lfn]['fsize']
+                    file.md5sum = file_metadata[file.lfn]['md5sum']
+                    file.checksum = file_metadata[file.lfn]['chksum']
+                    file.scope = file_metadata[file.lfn]['scope']
+                    # remove white space
+                    if file.md5sum is not None:
+                        file.md5sum = file.md5sum.strip()
+                    if file.checksum is not None:
+                        file.checksum = file.checksum.strip()
+            else:
+                if not job.prodSourceLabel in ['managed', 'test']:
+                    add_to_lfn_map = False
+
+            # check for missing file
+            if file.GUID == 'NULL' or job.prodSourceLabel in ['managed', 'test']:
+                if file.lfn not in file_metadata:
+                    # append job to waiting list
+                    err_msg = "GUID for {0} not found in Rucio".format(file.lfn)
+                    self.logger.error(err_msg)
+                    file.status = 'missing'
+                    if job not in jobs_failed:
+                        job.jobStatus = 'failed'
+                        job.ddmErrorCode = ErrorCode.EC_GUID
+                        job.ddmErrorDiag = err_msg
+
+                        jobs_failed.append(job)
+                        is_failed = True
+                    continue
+
+            # add to allLFNs/allGUIDs
+            if add_to_lfn_map:
+                cloud = job.getCloud()
+
+                all_lfns.setdefault(cloud, [])
+                all_guids.setdefault(cloud, [])
+                all_scopes.setdefault(cloud, [])
+
+                all_lfns[cloud].append(file.lfn)
+                all_guids[cloud].append(file.GUID)
+                all_scopes[cloud].append(file.scope)
+
+        # update the LFN with last attempt number in jobParameters
+        if not is_failed:
+            for patt, repl in replace_list:
+                job.jobParameters = re.sub('%s ' % patt, '%s ' % repl, job.jobParameters)
+            # append job to processed list
+            jobs_processed.append(job)
+
+    def __create_dataset_replica_map(self, input_lfn_list, all_lfns, all_guids, all_scopes):
+
+        jobs_processed = []
+        input_ds_errors = {}
+        lfn_map = {} # dictionary mapping datasets to LFNs
+        replica_map = {}
+        missing_datasets = {} # dictionary mapping datasets to reason for missing
+        jobs_failed = []
+        jobs_waiting = []
+
+        # loop over all jobs to collect datasets, resolve the files and create a dataset replica map
+        for job in self.jobs:
+
+            # set job failed if the computingSite does not exist
+            if job.computingSite != 'NULL' and (not job.computingSite in self.siteMapper.siteSpecList.keys()):
+                job.jobStatus    = 'failed'
+                job.ddmErrorCode = ErrorCode.EC_Setupper
+                job.ddmErrorDiag = 'computingSite:{0} is unknown'.format(job.computingSite)
+                jobs_processed.append(job)
+                continue
+
+            # ignore no prodDBlock jobs or container dataset
+            if job.prodDBlock == 'NULL':
+                # append job to processed list
+                jobs_processed.append(job)
+                continue
+
+            # make a list of all input datasets
+            datasets = []
+            for file in job.Files:
+                if file.type == 'input' and file.dispatchDBlock == 'NULL' \
+                        and (file.GUID == 'NULL' or job.prodSourceLabel in ['managed', 'test', 'ptest']):
+                    if file.dataset not in datasets:
+                        datasets.append(file.dataset)
+
+            # get LFN list
+            for dataset in datasets:
+                if not dataset in lfn_map.keys():
+                    input_ds_errors[dataset] = ''
+                    lfn_map[dataset] = {}
+
+                    # get the file metadata (checksum, size, events...)
+                    res = self.__get_file_metadata(dataset, input_lfn_list, lfn_map)
+                    file_metadata, input_ds_errors_tmp, missing_datasets_tmp, lfn_dataset_map_tmp = res
+                    # TODO: merge the responses with the local variables (or make the local variables global
+                    # or pass the variables)
+
+                    # get replica locations
+                    self.__get_dataset_replica_locations(self, dataset, job, input_ds_errors, replica_map)
+
+            # check for failed jobs
+            if self.__is_failed_job(job, datasets, missing_datasets, jobs_failed, jobs_waiting, input_ds_errors):
+                continue
+
+            # update the file metadata and LFN
+            self.__update_file_info(self, job, jobs_processed, lfn_map, file_metadata, jobs_failed, all_lfns, all_guids,
+                                   all_scopes)
+
+
     # correct LFN for attemptNr
     def _correctLFN(self):
 
@@ -805,223 +1071,19 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         jobsWaiting = []
         jobsFailed = []
         jobsProcessed = []
-        allLFNs   = {}
-        allGUIDs  = {}
-        allScopes = {}
+        all_lfns   = {}
+        all_guids  = {}
+        all_scopes = {}
         cloudMap  = {}
         lfnDsMap  = {}
         replicaMap = {}
 
         self.logger.debug('go into LFN correction')
 
-        # collect input LFNs
-        inputLFNs = set()
-        for tmpJob in self.jobs:
-            for tmpFile in tmpJob.Files:
-                if tmpFile.type == 'input':
-                    inputLFNs.add(tmpFile.lfn)
-                    genLFN = re.sub('\.\d+$','',tmpFile.lfn)
-                    inputLFNs.add(genLFN)
-                    if not tmpFile.GUID in ['NULL','',None]:
-                        if not tmpFile.dataset in self.lfnDatasetMap:
-                            self.lfnDatasetMap[tmpFile.dataset] = {}
-                        self.lfnDatasetMap[tmpFile.dataset][tmpFile.lfn] = {'guid': tmpFile.GUID,
-                                                                            'chksum': tmpFile.checksum,
-                                                                            'md5sum': tmpFile.md5sum,
-                                                                            'fsize': tmpFile.fsize,
-                                                                            'scope': tmpFile.scope}
+        input_lfn_list = self.__collect_input_lfns()
 
-        # loop over all jobs to collect datasets, resolve the files and create a dataset replica map
-        for job in self.jobs:
-            # set job failed if the computingSite does not exist
-            if job.computingSite != 'NULL' and (not job.computingSite in self.siteMapper.siteSpecList.keys()):
-                job.jobStatus    = 'failed'
-                job.ddmErrorCode = ErrorCode.EC_Setupper                
-                job.ddmErrorDiag = "computingSite:%s is unknown" % job.computingSite
-                # append job for downstream process
-                jobsProcessed.append(job)
-                continue
-
-            # ignore no prodDBlock jobs or container dataset
-            if job.prodDBlock == 'NULL':
-                # append job to processed list
-                jobsProcessed.append(job)
-                continue
-
-            # collect datasets
-            datasets = []
-            for file in job.Files:
-                if file.type == 'input' and file.dispatchDBlock == 'NULL' \
-                        and (file.GUID == 'NULL' or job.prodSourceLabel in ['managed', 'test', 'ptest']):
-                    if file.dataset not in datasets:
-                        datasets.append(file.dataset)
-
-            # get LFN list
-            for dataset in datasets:
-                if not dataset in lfnMap.keys():
-                    input_ds_errors[dataset] = ''
-                    lfnMap[dataset] = {}
-                    # get LFNs
-                    status, file_list = self.getListFilesInDataset(dataset, inputLFNs)
-                    if status != 0:
-                        self.logger.error(out)
-                        input_ds_errors[dataset] = 'could not get file list of prodDBlock %s' % dataset
-                        self.logger.error(input_ds_errors[dataset])
-                        # doesn't exist in Rucio
-                        if status == -1:
-                            missingDS[dataset] = "DS:%s not found in DDM" % dataset
-                        else:
-                            missingDS[dataset] = out
-                    else:
-                        # make map (key: LFN w/o attemptNr, value: LFN with attemptNr)
-                        file_list = out
-                        try:
-                            # loop over all files    
-                            for tmpLFN, vals in file_list.iteritems():
-                                valMap[tmpLFN] = vals
-                                genLFN = re.sub('\.\d+$','',tmpLFN)
-                                if lfnMap[dataset].has_key(genLFN):
-                                    # get attemptNr
-                                    newAttNr = 0
-                                    newMat = re.search('\.(\d+)$', tmpLFN)
-                                    if newMat != None:
-                                        newAttNr = int(newMat.group(1))
-                                    oldAttNr = 0
-                                    oldMat = re.search('\.(\d+)$', lfnMap[dataset][genLFN])
-                                    if oldMat != None:
-                                        oldAttNr = int(oldMat.group(1))
-                                    # compare
-                                    if newAttNr > oldAttNr:
-                                        lfnMap[dataset][genLFN] = tmpLFN
-                                else:
-                                    lfnMap[dataset][genLFN] = tmpLFN
-                                # mapping from LFN to DS
-                                lfnDsMap[lfnMap[dataset][genLFN]] = dataset
-                        except:
-                            input_ds_errors[dataset] = 'could not convert HTTP-res to map for prodDBlock %s' % dataset
-                            self.logger.error(input_ds_errors[dataset])
-                            self.logger.error(out)
-
-                    # get replica locations
-                    if job.prodSourceLabel in ['managed','test'] and input_ds_errors[dataset] == '' \
-                            and (not replicaMap.has_key(dataset)):
-                        if dataset.endswith('/'):
-                            status, out = self.getListDatasetReplicasInContainer(dataset)
-                        else:
-                            status, out = self.getListDatasetReplicas(dataset,False)
-
-                        if status != 0 or out.startswith('Error'):
-                            input_ds_errors[dataset] = 'could not get locations for %s' % dataset
-                            self.logger.error(input_ds_errors[dataset])
-                            self.logger.error(out)
-                        else:
-                            tmp_replicas_sites = {}
-                            try:
-                                # convert res to map
-                                exec "tmp_replicas_sites = %s" % out
-                                replicaMap[dataset] = tmp_replicas_sites
-                            except:
-                                input_ds_errors[dataset] = 'could not convert HTTP-res to replica map for %s' % dataset
-                                self.logger.error(input_ds_errors[dataset])
-                                self.logger.error(out)
-
-                            # append except DBR
-                            if not dataset.startswith('ddo'):
-                                self.replicaMapForBroker[dataset] = tmp_replicas_sites
-
-            # check for missing datasets and set their files as missing
-            isFailed = False
-            for dataset in datasets:
-                if missingDS.has_key(dataset):
-                    job.jobStatus = 'failed'
-                    job.ddmErrorCode = ErrorCode.EC_GUID
-                    job.ddmErrorDiag = missingDS[dataset]
-                    # set missing
-                    for tmpFile in job.Files:
-                        if tmpFile.dataset == dataset:
-                            tmpFile.status = 'missing'
-                    # append        
-                    jobsFailed.append(job)
-                    isFailed = True
-
-                    self.logger.debug("{0} failed with {1}".format(job.PandaID, missingDS[dataset]))
-                    break
-            if isFailed:
-                continue
-
-            # check for waiting
-            for dataset in datasets:
-                if input_ds_errors[dataset] != '':
-                    # append job to waiting list
-                    jobsWaiting.append(job)
-                    isFailed = True
-                    break
-            if isFailed:
-                continue
-
-            # replace generic LFN with real LFN
-            replaceList = []
-            isFailed = False
-            for file in job.Files:
-                if file.type == 'input' and file.dispatchDBlock == 'NULL':
-                    addToLfnMap = True
-                    if file.GUID == 'NULL':
-                        # get LFN w/o attemptNr
-                        basename = re.sub('\.\d+$','',file.lfn)
-                        if basename == file.lfn:
-                            # replace
-                            if basename in lfnMap[file.dataset].keys():
-                                file.lfn = lfnMap[file.dataset][basename]
-                                replaceList.append((basename,file.lfn))
-                        # set GUID
-                        if file.lfn in valMap:
-                            file.GUID = valMap[file.lfn]['guid']
-                            file.fsize = valMap[file.lfn]['fsize']
-                            file.md5sum = valMap[file.lfn]['md5sum']
-                            file.checksum = valMap[file.lfn]['chksum']
-                            file.scope = valMap[file.lfn]['scope']
-                            # remove white space
-                            if file.md5sum is not None:
-                                file.md5sum = file.md5sum.strip()
-                            if file.checksum is not None:
-                                file.checksum = file.checksum.strip()
-                    else:
-                        if not job.prodSourceLabel in ['managed','test']:
-                            addToLfnMap = False
-
-                    # check missing file
-                    if file.GUID == 'NULL' or job.prodSourceLabel in ['managed','test']:
-                        if not file.lfn in valMap:
-                            # append job to waiting list
-                            errMsg = "GUID for {0} not found in Rucio".format(file.lfn)
-                            self.logger.error(errMsg)
-                            file.status = 'missing'
-                            if not job in jobsFailed:
-                                job.jobStatus = 'failed'
-                                job.ddmErrorCode = ErrorCode.EC_GUID
-                                job.ddmErrorDiag = errMsg
-                                jobsFailed.append(job)
-                                isFailed = True
-                            continue
-
-                    # add to allLFNs/allGUIDs
-                    if addToLfnMap:
-                        if not allLFNs.has_key(job.getCloud()):
-                            allLFNs[job.getCloud()] = []
-                        if not allGUIDs.has_key(job.getCloud()):
-                            allGUIDs[job.getCloud()] = []
-                        if not allScopes.has_key(job.getCloud()):
-                            allScopes[job.getCloud()] = []
-                        allLFNs[job.getCloud()].append(file.lfn)
-                        allGUIDs[job.getCloud()].append(file.GUID)
-                        allScopes[job.getCloud()].append(file.scope)
-
-            # modify jobParameters
-            if not isFailed:
-                for patt, repl in replaceList:
-                    job.jobParameters = re.sub('%s '% patt, '%s '% repl, job.jobParameters)
-                # append job to processed list
-                jobsProcessed.append(job)
+        return_list = self.__create_dataset_replica_map(input_lfn_list, all_lfns, all_guids, all_scopes)
+# CONTINUE HERE HERE HERE. Check what the create_dataset_replica_map is returning or not
 
         # TODO: there is some part to fill the missing files at the computingSite that needs to be written
 
@@ -1037,16 +1099,16 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 tmpJob.inputFileBytes = 0
                 tmpInputFileProject = None
                 tmpInputFileType = None
-                for tmpFile in tmpJob.Files:
+                for file_tmp in tmpJob.Files:
                     # use input files and ignore DBR/lib.tgz
-                    if tmpFile.type == 'input' and (not tmpFile.dataset.startswith('ddo')) and not tmpFile.lfn.endswith('.lib.tgz'):
+                    if file_tmp.type == 'input' and (not file_tmp.dataset.startswith('ddo')) and not file_tmp.lfn.endswith('.lib.tgz'):
                         tmpJob.nInputDataFiles += 1
-                        if not tmpFile.fsize in ['NULL',None,0,'0']:
-                            tmpJob.inputFileBytes += tmpFile.fsize
+                        if not file_tmp.fsize in ['NULL',None,0,'0']:
+                            tmpJob.inputFileBytes += file_tmp.fsize
 
                         # get input type and project
                         if tmpInputFileProject is None:
-                            tmpInputItems = tmpFile.dataset.split('.')
+                            tmpInputItems = file_tmp.dataset.split('.')
                             # input project
                             tmpInputFileProject = tmpInputItems[0].split(':')[-1]
                             # input type. ignore user/group/groupXY 
@@ -1153,7 +1215,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         # query Rucio directly
         for iDDMTry in range(3):
             try:
-                self.logger.debug('listFilesInDataset '+dataset)
+                self.logger.debug('listFilesInDataset {0}'.format(dataset))
                 items, tmpDummy = rucioAPI.listFilesInDataset(dataset, file_list=file_list)
                 status = 0
                 break
@@ -1264,7 +1326,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         nTry = 3
         for iDDMTry in range(nTry):
             self.logger.debug("%s/%s listDatasetReplicas %s" % (iDDMTry,nTry,dataset))
-            status,out = rucioAPI.listDatasetReplicas(dataset)
+            status, out = rucioAPI.listDatasetReplicas(dataset)
             if status != 0:
                 time.sleep(10)
             else:
@@ -1326,223 +1388,187 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
     def _makeDisDatasetsForExistingfiles(self):
         """
-        Make dispatch datasets for existing files to avoid deletion while jobs are queued
-        # TODO: what is the difference with SetupSource?
+        Make dispatch datasets for existing files (for missing file the dispatch dataset was done beforehand) to avoid deletion while jobs are queued.
         :return:
         """
 
         self.logger.debug('make dis datasets for existing files')
         # collect existing files
-        dsFileMap = {}
-        nMaxJobs  = 20
-        nJobsMap  = {}
+        dataset_file_map = {}
+        max_jobs  = 20
+        njobs_map  = {}
 
-        for tmpJob in self.jobs:
+        # generate the dataset file map
+        for job_tmp in self.jobs:
 
             # use production or test jobs only
-            if tmpJob.prodSourceLabel not in ['managed', 'test']:
+            if job_tmp.prodSourceLabel not in ['managed', 'test']:
                 continue
             # skip for prefetcher or transferType=direct
-            if tmpJob.usePrefetcher() or tmpJob.transferType == 'direct':
+            if job_tmp.usePrefetcher() or job_tmp.transferType == 'direct':
                 continue
             # ignore inappropriate status
-            if tmpJob.jobStatus in ['failed', 'cancelled', 'waiting'] or tmpJob.isCancelled():
+            if job_tmp.jobStatus in ['failed', 'cancelled', 'waiting'] or job_tmp.isCancelled():
                 continue
 
-            # TODO: what is the background for this ND condition???
-            # check cloud
-            if tmpJob.getCloud() == 'ND' and self.siteMapper.getSite(tmpJob.computingSite).cloud == 'ND':
+            # skip ND cloud
+            if job_tmp.getCloud() == 'ND' and self.siteMapper.getSite(job_tmp.computingSite).cloud == 'ND':
                 continue
 
             # check SE to use T2 only
-            tmpSrcID = self.siteMapper.getCloud(tmpJob.getCloud())['source']
+            # TODO: can this block be removed? I don't understand the purpose
+            tmpSrcID = self.siteMapper.getCloud(job_tmp.getCloud())['source']
             srcSiteSpec = self.siteMapper.getSite(tmpSrcID)
-            dstSiteSpec = self.siteMapper.getSite(tmpJob.computingSite)
+            dstSiteSpec = self.siteMapper.getSite(job_tmp.computingSite)
             if dstSiteSpec.ddm_endpoints_input.isAssociated(srcSiteSpec.ddm_input):
                 continue
 
             # look for log _sub dataset to be used as a key
-            logSubDsName = ''
-            for tmpFile in tmpJob.Files:
-                if tmpFile.type == 'log':
-                    logSubDsName = tmpFile.destinationDBlock
+            log_dataset_name = ''
+            for file_tmp in job_tmp.Files:
+                if file_tmp.type == 'log':
+                    log_dataset_name = file_tmp.destinationDBlock
                     break
 
-            destDQ2ID = self.siteMapper.getSite(tmpJob.computingSite).ddm_input
+            # TODO: you should not blindly register the files to the default input
+            dest_rse = self.siteMapper.getSite(job_tmp.computingSite).ddm_input
 
-            # backend
-            ddmBackEnd = 'rucio'
-            mapKeyJob = (destDQ2ID, logSubDsName)
-            mapKey = (destDQ2ID, logSubDsName, nJobsMap[mapKeyJob] / nMaxJobs, ddmBackEnd)
+            map_key_job = (dest_rse, log_dataset_name)
+            njobs_map.setdefault(map_key_job, 0)
+            map_key = (dest_rse, log_dataset_name, njobs_map[map_key_job] / max_jobs)
 
             # increment the number of jobs per key
-            nJobsMap.setdefault(mapKeyJob, 0)
-            nJobsMap[mapKeyJob] += 1
+            njobs_map[map_key_job] += 1
 
-            dsFileMap.setdefault(mapKey, {})
+            dataset_file_map.setdefault(map_key, {})
 
             # add files
-            for tmpFile in tmpJob.Files:
-                if tmpFile.type != 'input':
+            for file_tmp in job_tmp.Files:
+
+                # skip output and log files
+                if file_tmp.type != 'input':
                     continue
 
-                # if files are unavailable at the dest site normal dis datasets contain them
-                # or files are cached
-                if not tmpFile.status in ['ready']:
+                # if files are unavailable at the dest site, it means normal dis datasets contain them or files are cached
+                if not file_tmp.status in ['ready']:
                     continue
 
-                # if available at T2
                 # TODO: understand how this works
-                realDestDQ2ID = (destDQ2ID, )
-                if self.availableLFNsInT2.has_key(tmpJob.getCloud()) and self.availableLFNsInT2[tmpJob.getCloud()].has_key(tmpFile.dataset) \
-                   and self.availableLFNsInT2[tmpJob.getCloud()][tmpFile.dataset]['sites'].has_key(tmpJob.computingSite) \
-                   and tmpFile.lfn in self.availableLFNsInT2[tmpJob.getCloud()][tmpFile.dataset]['sites'][tmpJob.computingSite]:
-                    realDestDQ2ID = self.availableLFNsInT2[tmpJob.getCloud()][tmpFile.dataset]['siteDQ2IDs'][tmpJob.computingSite]
-                    realDestDQ2ID = tuple(realDestDQ2ID)
+                real_dest_rse = (dest_rse, )
 
-                if not dsFileMap[mapKey].has_key(realDestDQ2ID):
-                    dsFileMap[mapKey][realDestDQ2ID] = {'taskID': tmpJob.taskID,
-                                                        'PandaID': tmpJob.PandaID,
-                                                        'files': {}}
+                default_job_entry = {'taskID': job_tmp.taskID, 'PandaID': job_tmp.PandaID, 'files': {}}
+                dataset_file_map[map_key].setdefault(real_dest_rse, default_job_entry)
 
-                if not dsFileMap[mapKey][realDestDQ2ID]['files'].has_key(tmpFile.lfn):
-                    # add scope
-                    tmpLFN = '{0}:{1}'.format(tmpFile.scope, tmpFile.lfn)
-                    dsFileMap[mapKey][realDestDQ2ID]['files'][tmpFile.lfn] = {'lfn' :tmpLFN,
-                                                                              'guid':tmpFile.GUID,
-                                                                              'fileSpecs':[]}
+                default_file_entry = {'lfn': '{0}:{1}'.format(file_tmp.scope, file_tmp.lfn), 'guid': file_tmp.GUID, 'fileSpecs': []}
+                dataset_file_map[map_key][real_dest_rse]['files'].setdefault(file_tmp.lfn, default_file_entry)
+
                 # add file spec
-                dsFileMap[mapKey][realDestDQ2ID]['files'][tmpFile.lfn]['fileSpecs'].append(tmpFile)
+                dataset_file_map[map_key][real_dest_rse]['files'][file_tmp.lfn]['fileSpecs'].append(file_tmp)
 
-        # loop over all locations
-        dispList = []
-        for tmpMapKey,tmpDumVal in dsFileMap.iteritems():
-            tmpDumLocation, tmpLogSubDsName, tmpBunchIdx, tmpDdmBackEnd = tmpMapKey
-            for tmpLocationList,tmpVal in tmpDumVal.iteritems():
-                for tmpLocation in tmpLocationList:
-                    tmpfile_list = tmpVal['files']
-                    if tmpfile_list == {}:
+        dispatch_block_list = []
+
+        # iterate the dataset_file_map to generate, close and subscribe the dispatch blocks
+        for map_key_tmp, dummy_value_tmp in dataset_file_map.iteritems():
+
+            dummy_location_tmp, log_dataset_name_tmp, bunch_index_tmp = map_key_tmp
+
+            # iterate the real_dest_rse
+            for location_list_tmp, value_tmp in dummy_value_tmp.iteritems():
+
+                # iterate the rse's in real_dest_rse
+                for location_tmp in location_list_tmp:
+                    file_list_tmp = value_tmp['files']
+
+                    if file_list_tmp == {}:
                         continue
-                    nMaxFiles = 500
-                    iFiles = 0
-                    iLoop = 0
-                    while iFiles < len(tmpfile_list):
-                        subFileNames = tmpfile_list.keys()[iFiles:iFiles+nMaxFiles]
-                        if len(subFileNames) == 0:
+
+                    max_files = 500
+                    i_files = 0
+                    i_loop = 0
+
+                    # iterate the files. they should all belong to the same job
+                    while i_files < len(file_list_tmp):
+                        sub_file_names = file_list_tmp.keys()[i_files:i_files+max_files]
+                        if len(sub_file_names) == 0:
                             break
-                        # dis name
-                        disDBlock = "panda.%s.%s.%s.%s_dis0%s%s" % (tmpVal['taskID'], time.strftime('%m.%d'), 'GEN',
-                                                                    commands.getoutput('uuidgen'), iLoop,
-                                                                    tmpVal['PandaID'])
-                        iFiles += nMaxFiles
-                        lfns    = []
-                        guids   = []
-                        fsizes  = []
+
+                        # generate the name for the dispatch block
+                        dispatch_block_name = "panda.%s.%s.%s.%s_dis0%s%s" % (value_tmp['taskID'],
+                                                                              time.strftime('%m.%d'), 'GEN',
+                                                                              commands.getoutput('uuidgen'), i_loop,
+                                                                              value_tmp['PandaID'])
+                        i_files += max_files
+                        lfns = []
+                        guids = []
+                        fsizes = []
                         chksums = []
 
-                        for tmpSubFileName in subFileNames:
-                            lfns.append(tmpfile_list[tmpSubFileName]['lfn'])
-                            guids.append(tmpfile_list[tmpSubFileName]['guid'])
-                            fsizes.append(long(tmpfile_list[tmpSubFileName]['fileSpecs'][0].fsize))
-                            chksums.append(tmpfile_list[tmpSubFileName]['fileSpecs'][0].checksum)
-                            # set dis name
-                            for tmpFileSpec in tmpfile_list[tmpSubFileName]['fileSpecs']:
-                                if tmpFileSpec.status in ['ready'] and tmpFileSpec.dispatchDBlock == 'NULL':
-                                    tmpFileSpec.dispatchDBlock = disDBlock
+                        # generate the lists with the files and its metadata
+                        for tmp_sub_file_name in sub_file_names:
+
+                            # get the file metadata
+                            lfns.append(file_list_tmp[tmp_sub_file_name]['lfn'])
+                            guids.append(file_list_tmp[tmp_sub_file_name]['guid'])
+                            fsizes.append(long(file_list_tmp[tmp_sub_file_name]['fileSpecs'][0].fsize))
+                            chksums.append(file_list_tmp[tmp_sub_file_name]['fileSpecs'][0].checksum)
+
+                            # set the dispatch block name
+                            for file_spec_tmp in file_list_tmp[tmp_sub_file_name]['fileSpecs']:
+                                if file_spec_tmp.status in ['ready'] and file_spec_tmp.dispatchDBlock == 'NULL':
+                                    file_spec_tmp.dispatchDBlock = dispatch_block_name
 
                         # register datasets
-                        iLoop += 1
-                        nDDMTry = 3
-                        isOK = False
-                        metadata = {'hidden':True,
-                                    'purge_replicas': 0}
-                        if not tmpVal['taskID'] in [None,'NULL']:
-                            metadata['task_id'] = str(tmpVal['taskID'])
-                        tmpMsg = 'ext registerNewDataset {ds} {lfns} {guids} {fsizes} {chksums} {meta}'
-                        self.logger.debug(tmpMsg.format(ds=disDBlock,
-                                                        lfns=str(lfns),
-                                                        guids=str(guids),
-                                                        fsizes=str(fsizes),
-                                                        chksums=str(chksums),
-                                                        meta=str(metadata)))
-                        for iDDMTry in range(nDDMTry):
-                            try:
-                                out = rucioAPI.registerDataset(disDBlock, lfns, guids, fsizes, chksums,
-                                                               lifetime=7, scope='panda', metadata=metadata)
-                                self.logger.debug(out)
-                                isOK = True
-                                break
-                            except:
-                                errType,errValue = sys.exc_info()[:2]
-                                self.logger.error("ext registerDataset : failed with {0}:{1}".format(errType,errValue)+traceback.format_exc())
-                                if iDDMTry+1 == nDDMTry:
-                                    break
-                                self.logger.debug("sleep {0}/{1}".format(iDDMTry,nDDMTry))
-                                time.sleep(10)
-                        # failure
-                        if not isOK:
-                            continue
-                        # get VUID
-                        try:
-                            exec "vuid = %s['vuid']" % str(out)
-                            # dataset spec. currentfiles is used to count the number of failed jobs
-                            ds = DatasetSpec()
-                            ds.vuid = vuid
-                            ds.name = disDBlock
-                            ds.type = 'dispatch'
-                            ds.status = 'defined'
-                            ds.numberfiles  = len(lfns)
-                            ds.currentfiles = 0
-                            dispList.append(ds)
-                        except:
-                            errType,errValue = sys.exc_info()[:2]
-                            self.logger.error("ext registerNewDataset : failed to decode VUID for %s - %s %s" % (disDBlock,errType,errValue))
+                        metadata = {'hidden':True, 'purge_replicas': 0}
+                        if value_tmp['taskID'] not in [None, 'NULL']:
+                            metadata['task_id'] = str(value_tmp['taskID'])
+
+                        msg_tmp = 'ext registerNewDataset {ds} {lfns} {guids} {fsizes} {chksums} {meta}'
+                        self.logger.debug(msg_tmp.format(ds=dispatch_block_name, lfns=str(lfns), guids=str(guids),
+                                                         fsizes=str(fsizes), chksums=str(chksums),
+                                                         meta=str(metadata)))
+
+                        status, out = self.__call_retry(rucioAPI.registerDataset, dispatch_block_name, lfns, guids,
+                                                        fsizes, chksums, lifetime=7, scope='panda', metadata=metadata)
+                        if not status:
+                            # do not attempt to subscribe the failed dataset
                             continue
 
-                        # freezeDataset dispatch dataset
-                        self.logger.debug('freezeDataset '+disDBlock)
-                        for iDDMTry in range(3):
-                            status = False
-                            try:
-                                rucioAPI.closeDataset(disDBlock)
-                                status = True
-                                break
-                            except:
-                                errtype,errvalue = sys.exc_info()[:2]
-                                out = 'failed to close : {0} {1}'.format(errtype,errvalue)
-                                time.sleep(10)
+                        # get the VUID from the response
+                        try:
+                            exec "vuid = {0}['vuid']".format(str(out))
+                            # dataset spec. currentfiles is used to count the number of failed jobs
+                            dispatch_block = DatasetSpec()
+                            dispatch_block.vuid = vuid
+                            dispatch_block.name = dispatch_block_name
+                            dispatch_block.type = 'dispatch'
+                            dispatch_block.status = 'defined'
+                            dispatch_block.numberfiles  = len(lfns)
+                            dispatch_block.currentfiles = 0
+                            dispatch_block_list.append(dispatch_block)
+                        except:
+                            err_type, err_value = sys.exc_info()[:2]
+                            self.logger.error('ext registerNewDataset : failed to decode VUID for {0} - {1} {2}'
+                                              .format(dispatch_block_name, err_type, err_value))
+                            continue
+
+                        # close dispatch dataset
+                        self.logger.debug('freezeDataset {0}'.format(dispatch_block_name))
+                        status, out = self.__call_retry(rucioAPI.closeDataset, dispatch_block_name)
                         if not status:
-                            self.logger.error(out)
                             continue
 
                         # register location
-                        isOK = False
                         self.logger.debug('ext registerDatasetLocation {ds} {dq2ID} {lifeTime}days asynchronous=True'.
-                                          format(ds=disDBlock, dq2ID=tmpLocation, lifeTime=7))
-                        nDDMTry = 3
-                        for iDDMTry in range(nDDMTry):
-                            try:
-                                out = rucioAPI.registerDatasetLocation(disDBlock, [tmpLocation], 7,
-                                                                       activity='Production Input',
-                                                                       scope='panda', asynchronous=True,
-                                                                       grouping='NONE')
-                                self.logger.debug(out)
-                                isOK = True
-                                break
-                            except:
-                                errType,errValue = sys.exc_info()[:2]
-                                self.logger.error("ext registerDatasetLocation : failed with {0}:{1}".format(errType,errValue))
-                                if iDDMTry+1 == nDDMTry:
-                                    break
-                                self.logger.debug("sleep {0}/{1}".format(iDDMTry,nDDMTry))
-                                time.sleep(10)
-                                
-                        # failure
-                        if not isOK:
+                                          format(ds=dispatch_block_name, dq2ID=location_tmp, lifeTime=7))
+
+                        status, out = self.__call_retry(rucioAPI.registerDatasetLocation, dispatch_block_name,
+                                                        [location_tmp], 7, activity='Production Input', scope='panda',
+                                                        asynchronous=True, grouping='NONE')
+                        if not status:
                             continue
 
         # insert datasets to DB
-        self.taskBuffer.insertDatasets(dispList)
+        self.taskBuffer.insertDatasets(dispatch_block_list)
         self.logger.debug('finished to make dis datasets for existing files')
         return
 
@@ -1555,7 +1581,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         dsLFNsMap = {}
         failedDS  = set()
         for jumboJobSpec in self.jumboJobs:
-            for tmpFileSpec in jumboJobSpec.Files:
+            for file_tmpSpec in jumboJobSpec.Files:
                 # only input
                 if not tmpFileSpec.type in ['input']:
                     continue
