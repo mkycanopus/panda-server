@@ -2,7 +2,7 @@
 setup dataset for ATLAS
 
 background (TODO: complete the background):
-- correctLFNs prepares all the information so that it can be reused in all the other steps
+- _input_dataset_file_preparation prepares all the information so that it can be reused in all the other steps
 - jobs with missing files have file.status = pending and have job.dispatchdblock set.
   For these jobs the function setupSource + _subscribeDistpatchDB take care of the input subscriptions
 - jobs with existing files have file.status = ready and job.dispatchdblock = None.
@@ -91,21 +91,21 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         try:
             self.logger.debug('start run()')
             self._memoryCheck()
-            bunchTag = ''
-            timeStart = datetime.datetime.utcnow()
+            bunch_tag = ''
+            time_start = datetime.datetime.utcnow()
 
             if self.jobs is not None and len(self.jobs) > 0:
-                bunchTag = 'PandaID:%s type:%s taskID:%s pType=%s' % (self.jobs[0].PandaID,
-                                                                      self.jobs[0].prodSourceLabel,
-                                                                      self.jobs[0].taskID,
-                                                                      self.jobs[0].processingType)
-                self.logger.debug(bunchTag)
+                bunch_tag = 'PandaID:{0} type:{1} taskID:{2} pType={3}'.format(self.jobs[0].PandaID,
+                                                                               self.jobs[0].prodSourceLabel,
+                                                                               self.jobs[0].taskID,
+                                                                               self.jobs[0].processingType)
+                self.logger.debug(bunch_tag)
 
             # instantiate site mapper
             self.siteMapper = SiteMapper(self.taskBuffer)
 
             # gather all the information
-            self._correctLFN()
+            self._input_dataset_file_preparation()
 
             # invoke brokerage
             self.logger.debug('brokerSchedule')
@@ -186,8 +186,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             # setup jumbo jobs
             self._setupJumbojobs()
             self._memoryCheck()
-            reg_time = datetime.datetime.utcnow() - timeStart
-            self.logger.debug('{0} took {1}sec'.format(bunchTag, reg_time.seconds))
+            reg_time = datetime.datetime.utcnow() - time_start
+            self.logger.debug('{0} took {1}sec'.format(bunch_tag, reg_time.seconds))
             self.logger.debug('end run()')
         except:
             err_type, err_value = sys.exc_info()[:2]
@@ -820,14 +820,11 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                                                               'scope': file_tmp.scope}
         return input_lfn_list
 
-    def __get_file_metadata(self, dataset, input_lfn_list, lfn_map):
+    def __get_file_metadata(self, dataset, input_lfn_list, dataset_lfn_map, lfn_dataset_map, missing_datasets, input_ds_errors):
         """
         Does a rucio.list_files of the dataset to retrieve the file metadata (checksum, size, events...)
         """
 
-        input_ds_errors = []
-        missing_datasets = {}
-        lfn_dataset_map = {}
         file_metadata = {}
 
         status, out = self.getListFilesInDataset(dataset, input_lfn_list)
@@ -844,32 +841,32 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             file_list = out
             try:
                 # loop over all files
-                for tmp_lfn, file_metadata in file_list.iteritems():
+                for tmp_lfn, file_attribs in file_list.iteritems():
                     file_metadata[tmp_lfn] = file_metadata
                     gen_lfn = self.__clean_lfn(tmp_lfn)
-                    if lfn_map[dataset].has_key(gen_lfn):
+                    if dataset_lfn_map[dataset].has_key(gen_lfn):
                         # get attemptNr
                         new_attempt_nr = 0
                         new_mat = re.search('\.(\d+)$', tmp_lfn)
                         if new_mat != None:
                             new_attempt_nr = int(new_mat.group(1))
                         old_attempt_nr = 0
-                        old_mat = re.search('\.(\d+)$', lfn_map[dataset][gen_lfn])
+                        old_mat = re.search('\.(\d+)$', dataset_lfn_map[dataset][gen_lfn])
                         if old_mat is not None:
                             old_attempt_nr = int(old_mat.group(1))
                         # keep the highest attempt number in the lfn map
                         if new_attempt_nr > old_attempt_nr:
-                            lfn_map[dataset][gen_lfn] = tmp_lfn
+                            dataset_lfn_map[dataset][gen_lfn] = tmp_lfn
                     else:
-                        lfn_map[dataset][gen_lfn] = tmp_lfn
+                        dataset_lfn_map[dataset][gen_lfn] = tmp_lfn
 
-                    lfn_dataset_map[lfn_map[dataset][gen_lfn]] = dataset
+                    lfn_dataset_map[dataset_lfn_map[dataset][gen_lfn]] = dataset
             except:
                 input_ds_errors[dataset] = 'could not convert HTTP-res to map for prodDBlock %s' % dataset
                 self.logger.error(input_ds_errors[dataset])
                 self.logger.error(out)
 
-        return file_metadata, input_ds_errors, missing_datasets, lfn_dataset_map
+        return file_metadata
 
     def __get_dataset_replica_locations(self, job, dataset, input_ds_errors, replica_map):
         # get dataset replica locations
@@ -932,11 +929,15 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
         return False
 
-    def __update_file_info(self, job, jobs_processed, lfn_map, file_metadata, jobs_failed, all_lfns, all_guids, all_scopes):
+    def __update_file_info(self, job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed, all_lfns, all_guids, all_scopes):
         """
         Iterates the files updating their metadata and replacing the LFN
         """
         replace_list = []
+
+        all_lfns = {}
+        all_guids = {}
+        all_scopes = {}
 
         is_failed = False
         for file in job.Files:
@@ -947,8 +948,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             if file.GUID == 'NULL':
                 clean_lfn = self.__clean_lfn(file.lfn)
                 # get the lfn with the last attempt number
-                if clean_lfn == file.lfn and clean_lfn in lfn_map[file.dataset].keys():
-                    file.lfn = lfn_map[file.dataset][clean_lfn]
+                if clean_lfn == file.lfn and clean_lfn in dataset_lfn_map[file.dataset].keys():
+                    file.lfn = dataset_lfn_map[file.dataset][clean_lfn]
                     replace_list.append((clean_lfn, file.lfn))
 
                 # set file metadata
@@ -1002,13 +1003,18 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             # append job to processed list
             jobs_processed.append(job)
 
-    def __create_dataset_replica_map(self, input_lfn_list, all_lfns, all_guids, all_scopes):
+        return all_lfns, all_guids, all_scopes
+
+    def __create_dataset_replica_map(self, input_lfn_list):
+
+        replica_map = {}
+        dataset_lfn_map = {} # dictionary mapping datasets to LFNs
+        lfn_dataset_map = {} # dictionary mapping LFNs to datasets
+
+        input_ds_errors = {}
+        missing_datasets = {} # dictionary mapping datasets to reason for missing
 
         jobs_processed = []
-        input_ds_errors = {}
-        lfn_map = {} # dictionary mapping datasets to LFNs
-        replica_map = {}
-        missing_datasets = {} # dictionary mapping datasets to reason for missing
         jobs_failed = []
         jobs_waiting = []
 
@@ -1017,7 +1023,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
             # set job failed if the computingSite does not exist
             if job.computingSite != 'NULL' and (not job.computingSite in self.siteMapper.siteSpecList.keys()):
-                job.jobStatus    = 'failed'
+                job.jobStatus = 'failed'
                 job.ddmErrorCode = ErrorCode.EC_Setupper
                 job.ddmErrorDiag = 'computingSite:{0} is unknown'.format(job.computingSite)
                 jobs_processed.append(job)
@@ -1039,15 +1045,13 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
             # get LFN list
             for dataset in datasets:
-                if not dataset in lfn_map.keys():
+                if not dataset in dataset_lfn_map.keys():
                     input_ds_errors[dataset] = ''
-                    lfn_map[dataset] = {}
+                    dataset_lfn_map[dataset] = {}
 
                     # get the file metadata (checksum, size, events...)
-                    res = self.__get_file_metadata(dataset, input_lfn_list, lfn_map)
-                    file_metadata, input_ds_errors_tmp, missing_datasets_tmp, lfn_dataset_map_tmp = res
-                    # TODO: merge the responses with the local variables (or make the local variables global
-                    # or pass the variables)
+                    file_metadata = self.__get_file_metadata(dataset, input_lfn_list, dataset_lfn_map, input_ds_errors,
+                                                             missing_datasets, lfn_dataset_map)
 
                     # get replica locations
                     self.__get_dataset_replica_locations(self, dataset, job, input_ds_errors, replica_map)
@@ -1057,101 +1061,193 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 continue
 
             # update the file metadata and LFN
-            self.__update_file_info(self, job, jobs_processed, lfn_map, file_metadata, jobs_failed, all_lfns, all_guids,
-                                   all_scopes)
+            all_lfns, all_guids, all_scopes = self.__update_file_info(self, job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed)
 
+        return dataset_lfn_map, lfn_dataset_map, replica_map, missing_datasets, \
+               jobs_processed, jobs_failed, jobs_waiting,\
+               all_lfns, all_guids, all_scopes
 
-    # correct LFN for attemptNr
-    def _correctLFN(self):
+    def __retrieve_file_replicas(self, all_lfns, all_guids, all_scopes, replica_map, lfn_dataset_map):
 
-        lfnMap = {}
-        valMap = {}
-        input_ds_errors = {}
-        missingDS = {}
-        jobsWaiting = []
-        jobsFailed = []
-        jobsProcessed = []
-        all_lfns   = {}
-        all_guids  = {}
-        all_scopes = {}
-        cloudMap  = {}
-        lfnDsMap  = {}
-        replicaMap = {}
+        for cloud, cloud_lfns in all_lfns.iteritems():
 
-        self.logger.debug('go into LFN correction')
+            # skip user and HC jobs
+            if len(self.jobs) > 0 and (self.jobs[0].prodSourceLabel in ['user', 'panda', 'ddm'] or \
+                                       self.jobs[0].processingType.startswith('gangarobot') or \
+                                       self.jobs[0].processingType.startswith('hammercloud')):
+                continue
+
+            # initialize cloud if needed
+            self.file_replicas.setdefault(cloud, {})
+
+            # loop over all files to retrieve the datasets
+            for tmp_lfn in cloud_lfns:
+
+                # skip if dataset is missing
+                if tmp_lfn not in lfn_dataset_map:
+                    continue
+
+                tmp_dataset = lfn_dataset_map[tmp_lfn]
+                if tmp_dataset not in self.file_replicas[cloud]:
+                    # collect sites
+                    tmp_site_ddm_map = DataServiceUtils.getSitesWithDataset(tmp_dataset, self.siteMapper, replica_map,
+                                                                            cloud, getDQ2ID=True)
+                    if tmp_site_ddm_map == {}:
+                        continue
+
+                    # initialize the dataset's file replica map
+                    self.file_replicas[cloud][tmp_dataset] = {'allfiles':[], 'allguids':[], 'allscopes':[], 'sites':{}}
+
+                    for tmp_site in tmp_site_ddm_map.keys():
+                        self.file_replicas[cloud][tmp_dataset]['sites'][tmp_site] = []
+
+                    self.file_replicas[cloud][tmp_dataset]['siteDQ2IDs'] = tmp_site_ddm_map
+
+                # add files
+                if tmp_lfn not in self.file_replicas[cloud][tmp_dataset]:
+                    self.file_replicas[cloud][tmp_dataset]['allfiles'].append(tmp_lfn)
+                    index_tmp_lfn = all_lfns[cloud].index(tmp_lfn)
+                    self.file_replicas[cloud][tmp_dataset]['allguids'].append(all_guids[cloud][index_tmp_lfn])
+                    self.file_replicas[cloud][tmp_dataset]['allscopes'].append(all_scopes[cloud][index_tmp_lfn])
+
+            # get available files at each site
+            for tmp_dataset in self.file_replicas[cloud].keys():
+
+                check_se_map = {}
+
+                # TODO: check with Tadashi, I don't understand why he seems to be looking at tapes only?
+                for tmp_site in self.file_replicas[cloud][tmp_dataset]['sites'].keys():
+                    tmp_site_spec = self.siteMapper.getSite(tmp_site)
+                    if tmp_site not in check_se_map:
+                        check_se_map[tmp_site] = []
+                        check_se_map[tmp_site] += tmp_site_spec.ddm_endpoints_input.getTapeEndPoints()
+
+                # for tmpCatURL in checkLfcSeMap.keys():
+
+                # get SEs
+                tmp_se_list = []
+                tmp_site_name_list = []
+                for tmp_site in check_se_map.keys():
+                    tmp_se_list += check_se_map[tmp_site]
+                    tmp_site_name_list.append(tmp_site)
+
+                # get available file list
+                self.logger.debug('checking {0} {1}'.format(tmp_se_list, tmp_site_name_list))
+                tmp_stat, bulk_av_files = rucioAPI.listFileReplicas(self.file_replicas[cloud][tmp_dataset]['allscopes'],
+                                                                    self.file_replicas[cloud][tmp_dataset]['allfiles'],
+                                                                    tmp_se_list)
+                if not tmp_stat:
+                    self.logger.error('failed to get file replicas')
+                    bulk_av_files = {}
+
+                # iterate the SEs to check and
+                for tmp_site, tmp_site_ses in check_se_map.iteritems():
+                    tmp_site_ses = set(tmp_site_ses)
+                    self.file_replicas[cloud][tmp_dataset]['sites'][tmp_site] = []
+                    for tmp_lfn_ck, tmp_file_ses in bulk_av_files.iteritems():
+                        site_has_file = False
+                        for tmp_file_se in tmp_file_ses:
+                            if tmp_file_se in tmp_site_ses:
+                                site_has_file = True
+                                break
+
+                        # append
+                        if site_has_file:
+                            self.file_replicas[cloud][tmp_dataset]['sites'][tmp_site].append(tmp_lfn_ck)
+
+                    n_files = len(self.file_replicas[cloud][tmp_dataset]['sites'][tmp_site])
+                    self.logger.debug('{0} files available at cloud={1} site={2} for dataset={3}'.format(n_files, cloud,
+                                                                                                         tmp_site,
+                                                                                                         tmp_dataset))
+
+    def _input_dataset_file_preparation(self):
+
+        self.logger.debug('Input datasets and files preparation')
 
         input_lfn_list = self.__collect_input_lfns()
 
-        return_list = self.__create_dataset_replica_map(input_lfn_list, all_lfns, all_guids, all_scopes)
-# CONTINUE HERE HERE HERE. Check what the create_dataset_replica_map is returning or not
+        ret_variables = self.__create_dataset_replica_map(input_lfn_list)
+        # unpack the results
+        dataset_lfn_map, lfn_dataset_map, replica_map, missing_datasets, jobs_processed, jobs_failed, jobs_waiting, \
+        all_lfns, all_guids, all_scopes= ret_variables
 
+        # resolves file replicas
+        self.__retrieve_file_replicas()
         # TODO: there is some part to fill the missing files at the computingSite that needs to be written
 
         # splits the dataset name to retrieve summary fields such as project and filetype
-        for tmpJob in self.jobs:
+        for tmp_job in self.jobs:
             try:
                 # set only for production/analysis/test
-                if not tmpJob.prodSourceLabel in ['managed', 'test', 'rc_test', 'ptest', 'user', 'prod_test']:
+                if not tmp_job.prodSourceLabel in ['managed', 'test', 'rc_test', 'ptest', 'user', 'prod_test']:
                     continue
 
                 # loop over all files
-                tmpJob.nInputDataFiles = 0
-                tmpJob.inputFileBytes = 0
-                tmpInputFileProject = None
-                tmpInputFileType = None
-                for file_tmp in tmpJob.Files:
+                tmp_job.nInputDataFiles = 0
+                tmp_job.inputFileBytes = 0
+                tmp_input_file_project = None
+                tmp_input_file_type = None
+                for file_tmp in tmp_job.Files:
                     # use input files and ignore DBR/lib.tgz
-                    if file_tmp.type == 'input' and (not file_tmp.dataset.startswith('ddo')) and not file_tmp.lfn.endswith('.lib.tgz'):
-                        tmpJob.nInputDataFiles += 1
-                        if not file_tmp.fsize in ['NULL',None,0,'0']:
-                            tmpJob.inputFileBytes += file_tmp.fsize
+                    if file_tmp.type == 'input' and not file_tmp.dataset.startswith('ddo') \
+                            and not file_tmp.lfn.endswith('.lib.tgz'):
+                        tmp_job.nInputDataFiles += 1
+                        if file_tmp.fsize not in ['NULL',None,0,'0']:
+                            tmp_job.inputFileBytes += file_tmp.fsize
 
                         # get input type and project
-                        if tmpInputFileProject is None:
-                            tmpInputItems = file_tmp.dataset.split('.')
+                        if tmp_input_file_project is None:
+                            tmp_input_items = file_tmp.dataset.split('.')
                             # input project
-                            tmpInputFileProject = tmpInputItems[0].split(':')[-1]
+                            tmp_input_file_project = tmp_input_items[0].split(':')[-1]
                             # input type. ignore user/group/groupXY 
-                            if len(tmpInputItems) > 4 and (not tmpInputItems[0] in ['', 'NULL', 'user', 'group']) \
-                                   and (not tmpInputItems[0].startswith('group')) and not tmpFile.dataset.startswith('panda.um.'):
-                                tmpInputFileType = tmpInputItems[4]
+                            if len(tmp_input_items) > 4 and (not tmp_input_items[0] in ['', 'NULL', 'user', 'group']) \
+                                    and not tmp_input_items[0].startswith('group') \
+                                    and not file_tmp.dataset.startswith('panda.um.'):
+                                tmp_input_file_type = tmp_input_items[4]
 
                 # set input type and project
-                if not tmpJob.prodDBlock in ['', None, 'NULL']:
+                if not tmp_job.prodDBlock in ['', None, 'NULL']:
                     # input project
-                    if tmpInputFileProject != None:
-                        tmpJob.inputFileProject = tmpInputFileProject
+                    if tmp_input_file_project is not None:
+                        tmp_job.inputFileProject = tmp_input_file_project
                     # input type
-                    if tmpInputFileType != None:
-                        tmpJob.inputFileType = tmpInputFileType
+                    if tmp_input_file_type is not None:
+                        tmp_job.inputFileType = tmp_input_file_type
 
                 # protection
-                maxInputFileBytes = 99999999999
-                if tmpJob.inputFileBytes > maxInputFileBytes:
-                    tmpJob.inputFileBytes = maxInputFileBytes
+                max_input_file_bytes = 99999999999
+                if tmp_job.inputFileBytes > max_input_file_bytes:
+                    tmp_job.inputFileBytes = max_input_file_bytes
+
                 # set background-able flag
-                tmpJob.setBackgroundableFlag()
+                tmp_job.setBackgroundableFlag()
 
             except:
-                errType,errValue = sys.exc_info()[:2]
-                self.logger.error("failed to set data summary fields for PandaID=%s: %s %s" % (tmpJob.PandaID,errType,errValue))
+                err_type, err_value = sys.exc_info()[:2]
+                self.logger.error("failed to set data summary fields for PandaID={0}: {1} {2}".
+                                  format(tmp_job.PandaID, err_type, err_value))
 
-        # send jobs to jobsWaiting4 table
-        self.taskBuffer.keepJobs(jobsWaiting)
+        # send waiting jobs to jobsWaiting4 table
+        self.taskBuffer.keepJobs(jobs_waiting)
         # update failed job
-        self.updateFailedJobs(jobsFailed)
+        self.updateFailedJobs(jobs_failed)
         # remove waiting/failed jobs
-        self.jobs = jobsProcessed
+        self.jobs = jobs_processed
 
         # delete huge variables
-        del lfnMap
-        del valMap
-        del input_ds_errors
-        del jobsWaiting
-        del jobsProcessed
-        del allLFNs
-        del allGUIDs
-        del cloudMap
+        del all_lfns
+        del all_guids
+        del all_scopes
+
+        del dataset_lfn_map
+        del lfn_dataset_map
+        del replica_map
+        del missing_datasets
+
+        del jobs_processed
+        del jobs_failed
+        del jobs_waiting
 
     def removeWaitingJobs(self):
         """
@@ -1161,11 +1257,11 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         jobs_processed = []
 
         # iterate jobs and separate waiting jobs
-        for tmpJob in self.jobs:
-            if tmpJob.jobStatus == 'waiting':
-                jobs_waiting.append(tmpJob)
+        for tmp_job in self.jobs:
+            if tmp_job.jobStatus == 'waiting':
+                jobs_waiting.append(tmp_job)
             else:
-                jobs_processed.append(tmpJob)
+                jobs_processed.append(tmp_job)
 
         # move waiting jobs to jobsWaiting4 table
         self.taskBuffer.keepJobs(jobs_waiting)
@@ -1660,7 +1756,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                     errType,errValue = sys.exc_info()[:2]
                     self.logger.debug('failed to register jumbo dis dataset {0} with {1}:{2}'.format(dispatchDBlock,
                                                                                                      errType,errValue))
-                    jumboJobSpec.jobStatus    = 'failed'
+                    jumboJobSpec.jobStatus = 'failed'
                     jumboJobSpec.ddmErrorCode = ErrorCode.EC_Setupper
                     jumboJobSpec.ddmErrorDiag = 'failed to register jumbo dispatch dataset {0}'.format(dispatchDBlock)
                     ngJobs.append(jumboJobSpec)
@@ -1675,7 +1771,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                     self.logger.debug('failed to subscribe jumbo dis dataset {0} to {1} with {2}:{3}'.format(dispatchDBlock,
                                                                                                              endPoint,
                                                                                                              errType,errValue))
-                    jumboJobSpec.jobStatus    = 'failed'
+                    jumboJobSpec.jobStatus = 'failed'
                     jumboJobSpec.ddmErrorCode = ErrorCode.EC_Setupper
                     jumboJobSpec.ddmErrorDiag = 'failed to subscribe jumbo dispatch dataset {0} to {1}'.format(dispatchDBlock,
                                                                                                                endPoint)

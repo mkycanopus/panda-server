@@ -30,8 +30,8 @@ def isCachedFile(datasetName,siteSpec):
 
 
 # get the list of sites where dataset is available
-def getSitesWithDataset(tmpDsName,siteMapper,replicaMap,cloudKey,useHomeCloud=False,getDQ2ID=False,
-                        useOnlineSite=False,includeT1=False):
+def getSitesWithDataset(tmpDsName, siteMapper, replicaMap, cloudKey, useHomeCloud=False, getDQ2ID=False,
+                        useOnlineSite=False, includeT1=False):
     retList = []
     retDQ2Map = {}
     # no replica map
