@@ -443,6 +443,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             job_list = self.jobs[startIdx:startIdx+nJobsInLoop]
 
         for job in job_list:
+            self.logger.debug('job computingsite:{0} destinationse:{1}'.format(job.computingSite, job.destinationSE))
 
             # ignore failed jobs
             if job.jobStatus in ['failed', 'cancelled'] or job.isCancelled():
@@ -450,6 +451,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
             zip_file_map = job.getZipFileMap()
             for file in job.Files:
+                self.logger.debug('file destinationDBlock:{0} destinationSE:{1} destinationDBlockToken:{2}'.format(file.destinationDBlock, file.destinationSE, file.destinationDBlockToken))
                 # ignore input files
                 if file.type in ['input', 'pseudo_input']:
                     continue
@@ -1014,9 +1016,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         input_ds_errors = {}
         missing_datasets = {} # dictionary mapping datasets to reason for missing
 
-        jobs_processed = []
-        jobs_failed = []
-        jobs_waiting = []
+        jobs_processed, jobs_failed, jobs_waiting = [], [], []
+        all_lfns, all_guids, all_scopes = {}, {}, {}
 
         # loop over all jobs to collect datasets, resolve the files and create a dataset replica map
         for job in self.jobs:
@@ -1054,7 +1055,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                                                              missing_datasets, lfn_dataset_map)
 
                     # get replica locations
-                    self.__get_dataset_replica_locations(self, dataset, job, input_ds_errors, replica_map)
+                    self.__get_dataset_replica_locations(job, dataset, input_ds_errors, replica_map)
 
             # check for failed jobs
             if self.__is_failed_job(job, datasets, missing_datasets, jobs_failed, jobs_waiting, input_ds_errors):
@@ -1172,7 +1173,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         all_lfns, all_guids, all_scopes= ret_variables
 
         # resolves file replicas
-        self.__retrieve_file_replicas()
+        self.__retrieve_file_replicas(all_lfns, all_guids, all_scopes, replica_map, lfn_dataset_map)
         # TODO: there is some part to fill the missing files at the computingSite that needs to be written
 
         # splits the dataset name to retrieve summary fields such as project and filetype
