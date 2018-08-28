@@ -1303,10 +1303,10 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             return
 
     # get list of files in dataset
-    def getListFilesInDataset(self, dataset, file_list=None, useCache=True):
+    def getListFilesInDataset(self, dataset, file_list=None, use_cache=True):
 
         # return cache data if available
-        if useCache and self.lfnDatasetMap.has_key(dataset):
+        if use_cache and self.lfnDatasetMap.has_key(dataset):
             return 0, self.lfnDatasetMap[dataset]
 
         # query Rucio directly
@@ -1324,8 +1324,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
         # there has been a problem
         if status != 0:
-            errType, errValue = sys.exc_info()[:2]
-            out = '{0} {1}'.format(errType, errValue)
+            err_type, err_value = sys.exc_info()[:2]
+            out = '{0} {1}'.format(err_type, err_value)
             return status, out
 
         # keep to avoid redundant lookup

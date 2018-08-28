@@ -524,16 +524,16 @@ class RucioAPI:
             return site_spec.ddm_input
 
     # list files in dataset
-    def listFilesInDataset(self, datasetName, long=False, fileList=None):
+    def listFilesInDataset(self, dataset_name, long=False, file_list=None):
         # extract scope from dataset
-        scope, dsn = self.extract_scope(datasetName)
+        scope, dsn = self.extract_scope(dataset_name)
         client = RucioClient()
         return_dict = {}
         for x in client.list_files(scope, dsn, long=long):
             tmpLFN = str(x['name'])
-            if fileList != None:
+            if file_list != None:
                 genLFN = re.sub('\.\d+$','',tmpLFN)
-                if not tmpLFN in fileList and not genLFN in fileList:
+                if not tmpLFN in file_list and not genLFN in file_list:
                     continue
             dq2attrs = {}
             dq2attrs['chksum'] = "ad:" + str(x['adler32'])
