@@ -52,7 +52,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         # all replica locations
         self.allReplicaMap = {}
         # replica map for special brokerage
-        self.replica_map__broker = {}
+        self.replica_map_broker = {}
         # available files at T2
         self.availableLFNsInT2 = {}
         # list of missing datasets
@@ -111,7 +111,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             self.logger.debug('brokerSchedule')
             self._memoryCheck()
             brokerage.broker.schedule(self.jobs,self.taskBuffer,self.siteMapper,
-                                      replicaMap=self.replica_map__broker,
+                                      replicaMap=self.replica_map_broker,
                                       t2FilesMap=self.availableLFNsInT2)
 
             # remove waiting jobs
