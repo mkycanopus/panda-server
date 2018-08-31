@@ -844,7 +844,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             try:
                 # loop over all files
                 for tmp_lfn, file_attribs in file_list.iteritems():
-                    file_metadata[tmp_lfn] = file_metadata
+                    file_metadata[tmp_lfn] = file_attribs
                     gen_lfn = self.__clean_lfn(tmp_lfn)
                     if dataset_lfn_map[dataset].has_key(gen_lfn):
                         # get attemptNr
