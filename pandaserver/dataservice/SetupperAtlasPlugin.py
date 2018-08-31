@@ -41,6 +41,9 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                       'useNativeDQ2': True,
                      }
         SetupperPluginBase.__init__(self, taskBuffer, jobs, logger, params, defaultMap)
+
+        # file replicas
+        self.file_replicas = {}
         # VUIDs of dispatchDBlocks
         self.vuidMap = {}
         # file list by dispatch dataset
@@ -53,14 +56,9 @@ class SetupperAtlasPlugin (SetupperPluginBase):
         self.allReplicaMap = {}
         # replica map for special brokerage
         self.replica_map_broker = {}
-        # available files at T2
-        self.availableLFNsInT2 = {}
-        # list of missing datasets
-        self.missingDatasetList = {}
         # lfn ds map
-        self.lfnDatasetMap = {}
-        # missing files at T1
-        self.missingFilesInT1 = {}
+        self.lfn_dataset_map = {}
+
 
     def __call_retry(self, call, *args, **kwargs):
         """
@@ -113,7 +111,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             brokerage.broker.schedule(self.jobs,self.taskBuffer,self.siteMapper,
                                       replicaMap=self.replica_map_broker,
                                       t2FilesMap=self.availableLFNsInT2)
-
+            # TODO: replace the availableLFNsInT2
             # remove waiting jobs
             self.removeWaitingJobs()
 
@@ -813,13 +811,13 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                     input_lfn_list.add(gen_lfn)
 
                     if file_tmp.GUID not in ['NULL', '', None]:
-                        if not file_tmp.dataset in self.lfnDatasetMap:
-                            self.lfnDatasetMap[file_tmp.dataset] = {}
-                        self.lfnDatasetMap[file_tmp.dataset][file_tmp.lfn] = {'guid': file_tmp.GUID,
-                                                                              'chksum': file_tmp.checksum,
-                                                                              'md5sum': file_tmp.md5sum,
-                                                                              'fsize': file_tmp.fsize,
-                                                                              'scope': file_tmp.scope}
+                        if not file_tmp.dataset in self.lfn_dataset_map:
+                            self.lfn_dataset_map[file_tmp.dataset] = {}
+                        self.lfn_dataset_map[file_tmp.dataset][file_tmp.lfn] = {'guid': file_tmp.GUID,
+                                                                                'chksum': file_tmp.checksum,
+                                                                                'md5sum': file_tmp.md5sum,
+                                                                                'fsize': file_tmp.fsize,
+                                                                                'scope': file_tmp.scope}
         return input_lfn_list
 
     def __get_file_metadata(self, dataset, input_lfn_list, dataset_lfn_map, lfn_dataset_map, missing_datasets, input_ds_errors):
@@ -1306,8 +1304,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
     def getListFilesInDataset(self, dataset, file_list=None, use_cache=True):
 
         # return cache data if available
-        if use_cache and self.lfnDatasetMap.has_key(dataset):
-            return 0, self.lfnDatasetMap[dataset]
+        if use_cache and self.lfn_dataset_map.has_key(dataset):
+            return 0, self.lfn_dataset_map[dataset]
 
         # query Rucio directly
         for iDDMTry in range(3):
@@ -1329,7 +1327,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             return status, out
 
         # keep to avoid redundant lookup
-        self.lfnDatasetMap[dataset] = items
+        self.lfn_dataset_map[dataset] = items
         return status, items
 
     def getListDatasetInContainer(self, container):
