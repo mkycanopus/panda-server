@@ -931,7 +931,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
 
         return False
 
-    def __update_file_info(self, job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed, all_lfns, all_guids, all_scopes):
+    def __update_file_info(self, job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed):
         """
         Iterates the files updating their metadata and replacing the LFN
         """
@@ -1050,19 +1050,19 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                     input_ds_errors[dataset] = ''
                     dataset_lfn_map[dataset] = {}
 
-                    # get the file metadata (checksum, size, events...)
-                    file_metadata = self.__get_file_metadata(dataset, input_lfn_list, dataset_lfn_map, input_ds_errors,
-                                                             missing_datasets, lfn_dataset_map)
-
                     # get replica locations
                     self.__get_dataset_replica_locations(job, dataset, input_ds_errors, replica_map)
+
+            # get the file metadata (checksum, size, events...)
+            file_metadata = self.__get_file_metadata(dataset, input_lfn_list, dataset_lfn_map, lfn_dataset_map,
+                                                     missing_datasets, input_ds_errors)
 
             # check for failed jobs
             if self.__is_failed_job(job, datasets, missing_datasets, jobs_failed, jobs_waiting, input_ds_errors):
                 continue
 
             # update the file metadata and LFN
-            all_lfns, all_guids, all_scopes = self.__update_file_info(self, job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed)
+            all_lfns, all_guids, all_scopes = self.__update_file_info(job, jobs_processed, dataset_lfn_map, file_metadata, jobs_failed)
 
         return dataset_lfn_map, lfn_dataset_map, replica_map, missing_datasets, \
                jobs_processed, jobs_failed, jobs_waiting,\
