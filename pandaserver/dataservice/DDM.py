@@ -527,6 +527,11 @@ class RucioAPI:
     def listFilesInDataset(self, dataset_name, long=False, file_list=None):
         # extract scope from dataset
         scope, dsn = self.extract_scope(dataset_name)
+
+        # strip off the slash for containers
+        if dsn.endswith('/'):
+            dsn = dsn[:-1]
+
         client = RucioClient()
         return_dict = {}
         for x in client.list_files(scope, dsn, long=long):
