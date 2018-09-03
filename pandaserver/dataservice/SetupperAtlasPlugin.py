@@ -110,8 +110,8 @@ class SetupperAtlasPlugin (SetupperPluginBase):
             self._memoryCheck()
             brokerage.broker.schedule(self.jobs,self.taskBuffer,self.siteMapper,
                                       replicaMap=self.replica_map_broker,
-                                      t2FilesMap=self.availableLFNsInT2)
-            # TODO: replace the availableLFNsInT2
+                                      t2FilesMap=self.file_replicas)
+
             # remove waiting jobs
             self.removeWaitingJobs()
 
@@ -747,6 +747,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 computing_site_spec = self.siteMapper.getSite(job.computingSite)
 
                 # 1. Find the location of the input files on associated storages
+                self.logger.debug('list_file_replicas {0} {1}'.format(job.dispatchDBlock, computing_site_spec))
                 status, dst_endpoints = self.__call_retry(rucioAPI.list_file_replicas, job.dispatchDBlock, computing_site_spec)
                 if not status:
                     continue
@@ -755,7 +756,7 @@ class SetupperAtlasPlugin (SetupperPluginBase):
                 # 2. Unless Rucio is not in use, prepare the subscription
                 if (not self.pandaDDM) and job.prodSourceLabel != 'ddm':
 
-                    opt_owner, opt_activity, opt_comment = self._prepare_subscription_metadata(self, job)
+                    opt_owner, opt_activity, opt_comment = self._prepare_subscription_metadata(job)
 
                     # TODO: this part needs the Rucio distributed dataset logic
                     # http://rucio.readthedocs.io/en/latest/api/rule.html

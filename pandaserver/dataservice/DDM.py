@@ -95,7 +95,7 @@ class RucioAPI:
         if grouping is None:
             grouping = 'DATASET'
         presetScope = scope
-        if lifetime != None:
+        if lifetime is None:
             lifetime = lifetime*24*60*60
         scope,dsn = self.extract_scope(dsn)    
         if presetScope is not None:
@@ -480,7 +480,7 @@ class RucioAPI:
         """
 
         # retrieve the scope of the dataset
-        scope = self.extract_scope(dis_dsn)
+        scope, dis_dsn = self.extract_scope(dis_dsn)
 
         # retrieve the RSEs associated to the queue
         inputs_all = site_spec.ddm_endpoints_input.all
